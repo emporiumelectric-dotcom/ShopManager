@@ -148,7 +148,7 @@ var TODAY=new Date().toLocaleDateString("en-IN",{weekday:"short",day:"numeric",m
 var ST={
   user:null, stores:[], storeId:null, storeName:"",
   tab:"inventory", inv:[], hist:[], cart:[],
-  modal:null, editItem:null, invQ:"", invCat:"", invShow:300,
+  modal:null, editItem:null, invQ:"", invCat:"", invPage:1, invPageSize:50,
   siRows:[{id:1,itemId:null,name:"",qty:1}], siSupplier:"", siRef:"", siDate:TODAYKEY,
   histQ:"", loading:false, importStatus:"", switchModalOpen:false
 };
@@ -346,7 +346,12 @@ function renderInv(tc){
   var neg=ST.inv.filter(function(i){return i.qty<0;}).length;
   var low=ST.inv.filter(function(i){return i.min>0&&i.qty<=i.min;}).length;
   var cats=[...new Set(ST.inv.map(function(i){return i.cat||""}))].sort();
-  var rows=items.slice(0,ST.invShow).map(function(i){
+  var pageSize=ST.invPageSize;
+  var totalPages=Math.max(1,Math.ceil(items.length/pageSize));
+  if(ST.invPage>totalPages)ST.invPage=totalPages;
+  if(ST.invPage<1)ST.invPage=1;
+  var pageStart=(ST.invPage-1)*pageSize;
+  var rows=items.slice(pageStart,pageStart+pageSize).map(function(i){
     var st=i.qty<0?"<span class='badge bdanger'>"+i.qty+"</span>":i.qty===0?"<span class='badge bwarn'>0</span>":"<b>"+i.qty+"</b>";
     var catCell=isOwner?"<button class='catbtn' data-id='"+i.id+"'>"+(esc(i.cat||"(none)"))+"</button>":"<span class='badge binfo' style='font-size:10px'>"+esc(i.cat||"")+"</span>";
     var compCell=isOwner?"<button class='compbtn' data-id='"+i.id+"'>"+(esc(i.company||"+ add"))+"</button>":esc(i.company||"—");
@@ -354,19 +359,18 @@ function renderInv(tc){
   }).join("");
   if(!rows)rows="<tr><td colspan='6' style='text-align:center;color:#aaa;padding:2rem'>No items found.</td></tr>";
   var catopts='<option value="">All categories</option>'+cats.map(function(c){return '<option value="'+esc(c)+'"'+(ST.invCat===c?" selected":"")+">"+esc(c)+"</option>";}).join("");
-  tc.innerHTML='<div class="mgrid"><div class="metric"><div class="mlabel">Total Items</div><div class="mval">'+ST.inv.length.toLocaleString("en-IN")+'</div></div><div class="metric"><div class="mlabel">Negative</div><div class="mval '+(neg>0?"danger":"ok")+'">'+neg+'</div></div><div class="metric"><div class="mlabel">Low Stock</div><div class="mval '+(low>0?"warn":"ok")+'">'+low+'</div></div><div class="metric"><div class="mlabel">Shown</div><div class="mval">'+Math.min(ST.invShow,items.length).toLocaleString("en-IN")+' / '+items.length.toLocaleString("en-IN")+'</div></div></div>'
+  var shownFrom=items.length?pageStart+1:0, shownTo=Math.min(pageStart+pageSize,items.length);
+  tc.innerHTML='<div class="mgrid"><div class="metric"><div class="mlabel">Total Items</div><div class="mval">'+ST.inv.length.toLocaleString("en-IN")+'</div></div><div class="metric"><div class="mlabel">Negative</div><div class="mval '+(neg>0?"danger":"ok")+'">'+neg+'</div></div><div class="metric"><div class="mlabel">Low Stock</div><div class="mval '+(low>0?"warn":"ok")+'">'+low+'</div></div><div class="metric"><div class="mlabel">Shown</div><div class="mval">'+shownFrom+'&ndash;'+shownTo+' / '+items.length.toLocaleString("en-IN")+'</div></div></div>'
     +'<div class="card"><div class="ctitle"><span>Inventory &mdash; '+esc(ST.storeName)+'</span>'+(isOwner?"<button class='btn btnp btnsm' id='additembtn'>+ Add item</button>":"")+'</div>'
     +'<div class="srow"><input type="text" id="invsearch" placeholder="Search items..." value="'+esc(ST.invQ)+'"><select id="catsel" style="max-width:180px">'+catopts+'</select></div>'
     +(isOwner?'<div style="font-size:11px;color:#999;margin-bottom:6px">Tip: click a category or company to rename it, or type a new one to create it.</div>':"")
     +'<div class="twrap"><table><thead><tr><th>Item</th><th>Category</th><th>Company</th><th>Qty</th><th>Unit</th>'+(isOwner?"<th></th>":"")+'</tr></thead><tbody>'+rows+'</tbody></table></div>'
-    +(items.length>ST.invShow?'<div style="text-align:center;padding:12px"><button class="btn" id="loadmorebtn">Load 300 more ('+(items.length-ST.invShow).toLocaleString("en-IN")+' remaining)</button> &nbsp; <button class="btn" id="loadallbtn">Show all '+items.length.toLocaleString("en-IN")+'</button></div>':"")
+    +'<div style="display:flex;align-items:center;justify-content:center;gap:12px;padding:14px 0"><button class="btn btnsm" id="prevpagebtn" '+(ST.invPage<=1?"disabled":"")+'>&larr; Prev</button><span style="font-size:13px;color:#666">Page '+ST.invPage+' of '+totalPages+'</span><button class="btn btnsm" id="nextpagebtn" '+(ST.invPage>=totalPages?"disabled":"")+'>Next &rarr;</button></div>'
     +'</div>';
-  G("invsearch").oninput=function(){ST.invQ=this.value;ST.invShow=300;renderInv(tc);};
-  G("catsel").onchange=function(){ST.invCat=this.value;ST.invShow=300;renderInv(tc);};
-  if(items.length>ST.invShow){
-    G("loadmorebtn").onclick=function(){ST.invShow+=300;renderInv(tc);};
-    G("loadallbtn").onclick=function(){ST.invShow=items.length;renderInv(tc);};
-  }
+  G("invsearch").oninput=function(){ST.invQ=this.value;ST.invPage=1;renderInv(tc);};
+  G("catsel").onchange=function(){ST.invCat=this.value;ST.invPage=1;renderInv(tc);};
+  G("prevpagebtn").onclick=function(){if(ST.invPage>1){ST.invPage--;renderInv(tc);}};
+  G("nextpagebtn").onclick=function(){if(ST.invPage<totalPages){ST.invPage++;renderInv(tc);}};
   if(focusInfo){
     var el=G(focusInfo.id);
     if(el){el.focus();try{el.setSelectionRange(focusInfo.pos,focusInfo.pos);}catch(e){}}
