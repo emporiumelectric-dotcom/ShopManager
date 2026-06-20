@@ -204,7 +204,7 @@ var ST={
   tab:"inventory", inv:[], hist:[], cart:[],
   modal:null, editItem:null, invQ:"", invCat:"", invPage:1, invPageSize:50,
   siRows:[{id:1,itemId:null,name:"",qty:1}], siSupplier:"", siRef:"", siDate:TODAYKEY,
-  histQ:"", loading:false, importStatus:"", switchModalOpen:false, editTxn:null
+  histQ:"", histFrom:"", histTo:"", loading:false, importStatus:"", switchModalOpen:false, editTxn:null
 };
 
 function G(id){return document.getElementById(id);}
@@ -700,14 +700,32 @@ async function saveSI(){
 function renderHist(tc){
   var canDelete=ST.user&&(ST.user.role==="owner"||ST.user.canDelete);
   var q=ST.histQ.toLowerCase();
-  var h=ST.hist.filter(function(e){if(!q)return true;if(e.date.includes(q)||e.ref.toLowerCase().includes(q)||(e.supplier||"").toLowerCase().includes(q))return true;return e.items.some(function(it){return it.name.toLowerCase().includes(q);});});
+  var h=ST.hist.filter(function(e){
+    if(ST.histFrom&&e.date<ST.histFrom)return false;
+    if(ST.histTo&&e.date>ST.histTo)return false;
+    if(!q)return true;
+    if(e.date.includes(q)||e.ref.toLowerCase().includes(q)||(e.supplier||"").toLowerCase().includes(q))return true;
+    return e.items.some(function(it){return it.name.toLowerCase().includes(q);});
+  });
   var entries=h.slice(0,80).map(function(entry){
     var irows=entry.items.map(function(it){return "<tr><td style='font-size:12px'>"+esc(it.name)+"</td><td style='font-size:12px'>"+it.qty+"</td></tr>";}).join("");
     var actions=canDelete?'<button class="btn btnsm edittxnbtn" data-id="'+entry.id+'">&#9998; Edit</button><button class="btn btnsm btnd deltxnbtn" data-id="'+entry.id+'">&#128465; Delete</button>':"";
     return '<div class="hist-entry"><div class="hist-head"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="hist-type '+(entry.type==="in"?"tin":"tout")+'">'+(entry.type==="in"?"&#128229; Stock IN":"&#128722; Sale OUT")+'</span><span style="font-size:13px;font-weight:600;color:var(--ink)">'+(entry.type==="in"?"Supplier: "+esc(entry.supplier||"—")+" &middot; ":"")+"Ref: "+esc(entry.ref||"—")+'</span></div><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><div style="font-size:12px;color:var(--faint)">'+entry.date+' &middot; by '+esc(entry.by)+'</div>'+actions+'</div></div><table style="min-width:0"><thead><tr><th>Item</th><th style="width:60px">Qty</th></tr></thead><tbody>'+irows+'</tbody></table></div>';
   }).join("");
-  tc.innerHTML='<div class="card"><div class="ctitle">Transaction History &mdash; '+esc(ST.storeName)+' <span style="font-size:12px;color:var(--faint);font-weight:400">(latest 300)</span></div><div class="srow"><input type="text" id="histsearch" placeholder="Search by item, date, ref..." value="'+esc(ST.histQ)+'" style="max-width:380px"></div>'+(entries||'<div style="font-size:13px;color:var(--faint);text-align:center;padding:2rem">No transactions found.</div>')+'</div>';
+  var hasFilter=ST.histFrom||ST.histTo;
+  tc.innerHTML='<div class="card"><div class="ctitle">Transaction History &mdash; '+esc(ST.storeName)+' <span style="font-size:12px;color:var(--faint);font-weight:400">('+h.length+' of latest 300'+(hasFilter?", filtered":"")+')</span></div>'
+    +'<div class="srow"><input type="text" id="histsearch" placeholder="Search by item, date, ref..." value="'+esc(ST.histQ)+'" style="max-width:300px"></div>'
+    +'<div class="srow" style="margin-top:-6px"><label style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase">From</label><input type="date" id="histfrom" value="'+ST.histFrom+'" style="max-width:160px"><label style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase">To</label><input type="date" id="histto" value="'+ST.histTo+'" style="max-width:160px">'
+    +'<button class="btn btnsm" id="hfToday">Today</button><button class="btn btnsm" id="hf7d">Last 7 days</button><button class="btn btnsm" id="hf30d">Last 30 days</button>'
+    +(hasFilter?'<button class="btn btnsm" id="hfClear">&#215; Clear</button>':"")+'</div>'
+    +(entries||'<div style="font-size:13px;color:var(--faint);text-align:center;padding:2rem">No transactions found'+(hasFilter||q?" for this filter":"")+'.</div>')+'</div>';
   G("histsearch").oninput=function(){ST.histQ=this.value;renderTab();};
+  G("histfrom").onchange=function(){ST.histFrom=this.value;renderTab();};
+  G("histto").onchange=function(){ST.histTo=this.value;renderTab();};
+  G("hfToday").onclick=function(){ST.histFrom=TODAYKEY;ST.histTo=TODAYKEY;renderTab();};
+  G("hf7d").onclick=function(){var d=new Date();d.setDate(d.getDate()-6);ST.histFrom=d.toISOString().slice(0,10);ST.histTo=TODAYKEY;renderTab();};
+  G("hf30d").onclick=function(){var d=new Date();d.setDate(d.getDate()-29);ST.histFrom=d.toISOString().slice(0,10);ST.histTo=TODAYKEY;renderTab();};
+  if(hasFilter)G("hfClear").onclick=function(){ST.histFrom="";ST.histTo="";renderTab();};
   if(canDelete){
     tc.querySelectorAll(".edittxnbtn").forEach(function(btn){btn.onclick=function(){openEditTxn(this.dataset.id);};});
     tc.querySelectorAll(".deltxnbtn").forEach(function(btn){btn.onclick=function(){doDeleteTxn(this.dataset.id);};});
