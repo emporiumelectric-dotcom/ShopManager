@@ -1,7 +1,7 @@
 // ShopManager service worker — only purpose is to make the app installable
-// and let the shell load instantly. It deliberately does NOT cache or
-// interfere with Supabase API calls, so your data always stays live/synced.
-const CACHE_NAME = "shopmanager-shell-v1";
+// and let the shell load instantly when offline. It deliberately does NOT
+// cache or interfere with Supabase API calls, so your data always stays live.
+const CACHE_NAME = "shopmanager-shell-v2";
 const SHELL_FILES = ["./index.html", "./manifest.json", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", function (e) {
@@ -34,19 +34,18 @@ self.addEventListener("fetch", function (e) {
     return;
   }
 
+  // Network-first: always try to get the latest version when online (so
+  // app updates show immediately, in the APK too). Only fall back to the
+  // cached copy if the device has no internet connection right now.
   e.respondWith(
-    caches.match(e.request).then(function (cached) {
-      var network = fetch(e.request)
-        .then(function (res) {
-          if (res && res.status === 200) {
-            var copy = res.clone();
-            caches.open(CACHE_NAME).then(function (cache) { cache.put(e.request, copy); });
-          }
-          return res;
-        })
-        .catch(function () { return cached; });
-      // Shell loads instantly from cache, refreshes in background.
-      return cached || network;
-    })
+    fetch(e.request)
+      .then(function (res) {
+        if (res && res.status === 200) {
+          var copy = res.clone();
+          caches.open(CACHE_NAME).then(function (cache) { cache.put(e.request, copy); });
+        }
+        return res;
+      })
+      .catch(function () { return caches.match(e.request); })
   );
 });
