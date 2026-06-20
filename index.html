@@ -204,7 +204,7 @@ var ST={
   tab:"inventory", inv:[], hist:[], cart:[],
   modal:null, editItem:null, invQ:"", invCat:"", invPage:1, invPageSize:50,
   siRows:[{id:1,itemId:null,name:"",qty:1}], siSupplier:"", siRef:"", siDate:TODAYKEY,
-  histQ:"", loading:false, importStatus:"", switchModalOpen:false
+  histQ:"", loading:false, importStatus:"", switchModalOpen:false, editTxn:null
 };
 
 function G(id){return document.getElementById(id);}
@@ -251,8 +251,7 @@ async function fetchHistory(storeId){
   if(error){console.error(error);return [];}
   return data.map(function(t){
     return {id:t.id,type:t.type,ref:t.ref||"—",supplier:t.supplier||"—",date:t.txn_date,by:t.by_user||"—",
-      reversed:!!t.reversed,isReversal:!!t.is_reversal,reversesId:t.reverses_id||null,
-      items:(t.transaction_items||[]).map(function(li){return{itemId:li.item_id,name:li.item_name,qty:Number(li.qty)};})};
+      items:(t.transaction_items||[]).map(function(li){return{id:li.id,itemId:li.item_id,name:li.item_name,qty:Number(li.qty)};})};
   });
 }
 async function loadStoreData(storeId){
@@ -301,21 +300,46 @@ async function dbRecordTransaction(type,meta,lines,extra){
   }
   return true;
 }
-async function dbMarkReversed(id){
-  var {error}=await sb.from("transactions").update({reversed:true}).eq("id",id);
-  if(error){console.error(error);return false;}
+// Deletes a transaction entirely and reverts its stock impact (e.g. a Sale
+// that deducted 5 units gives those 5 back; a Stock IN that added 5 removes them).
+async function dbDeleteTransaction(entry){
+  for(var i=0;i<entry.items.length;i++){
+    var l=entry.items[i],item=ST.inv.find(function(x){return x.id===l.itemId;});
+    if(!item)continue;
+    var newQty=entry.type==="out"?item.qty+l.qty:item.qty-l.qty;
+    await sb.from("items").update({qty:newQty,updated_at:new Date().toISOString()}).eq("id",l.itemId);
+    item.qty=newQty;
+  }
+  var {error:e1}=await sb.from("transaction_items").delete().eq("transaction_id",entry.id);
+  if(e1){alert("Error deleting line items: "+e1.message);return false;}
+  var {error:e2}=await sb.from("transactions").delete().eq("id",entry.id);
+  if(e2){alert("Error deleting transaction: "+e2.message);return false;}
   return true;
 }
-// Reversing never edits or deletes the original record — it creates an
-// offsetting transaction (so stock is corrected) and flags the original as
-// reversed, keeping a full audit trail of what happened and what was fixed.
-async function dbReverseTransaction(entry){
-  var reverseType=entry.type==="out"?"in":"out";
-  var refLabel="Reversal of "+(entry.ref&&entry.ref!=="—"?entry.ref:("#"+entry.id));
-  var meta={ref:refLabel,date:TODAYKEY,supplier:entry.supplier!=="—"?entry.supplier:undefined};
-  var ok=await dbRecordTransaction(reverseType,meta,entry.items,{is_reversal:true,reverses_id:String(entry.id)});
-  if(!ok)return false;
-  await dbMarkReversed(entry.id);
+// Applies edited line quantities for a transaction: adjusts stock by the
+// difference between old and new qty for each line, removes lines set to 0,
+// and deletes the whole transaction if every line ends up removed.
+async function dbEditTransactionLines(entry,editedLines){
+  for(var i=0;i<editedLines.length;i++){
+    var el=editedLines[i];
+    var item=ST.inv.find(function(x){return x.id===el.itemId;});
+    var delta=el.newQty-el.oldQty; // positive = line qty increased
+    if(item){
+      var stockDelta=entry.type==="out"?-delta:delta;
+      var newQty=item.qty+stockDelta;
+      await sb.from("items").update({qty:newQty,updated_at:new Date().toISOString()}).eq("id",el.itemId);
+      item.qty=newQty;
+    }
+    if(el.newQty<=0){
+      await sb.from("transaction_items").delete().eq("id",el.lineId);
+    }else{
+      await sb.from("transaction_items").update({qty:el.newQty}).eq("id",el.lineId);
+    }
+  }
+  var remaining=editedLines.filter(function(el){return el.newQty>0;});
+  if(remaining.length===0){
+    await sb.from("transactions").delete().eq("id",entry.id);
+  }
   return true;
 }
 
@@ -679,26 +703,58 @@ function renderHist(tc){
   var h=ST.hist.filter(function(e){if(!q)return true;if(e.date.includes(q)||e.ref.toLowerCase().includes(q)||(e.supplier||"").toLowerCase().includes(q))return true;return e.items.some(function(it){return it.name.toLowerCase().includes(q);});});
   var entries=h.slice(0,80).map(function(entry){
     var irows=entry.items.map(function(it){return "<tr><td style='font-size:12px'>"+esc(it.name)+"</td><td style='font-size:12px'>"+it.qty+"</td></tr>";}).join("");
-    var statusBadge=entry.reversed?'<span class="badge bdanger">Reversed</span>':(entry.isReversal?'<span class="badge binfo">Reversal</span>':"");
-    var reverseBtn=(canDelete&&!entry.reversed&&!entry.isReversal)?'<button class="btn btnsm btnd reversebtn" data-id="'+entry.id+'">&#8634; Reverse</button>':"";
-    return '<div class="hist-entry"><div class="hist-head"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="hist-type '+(entry.type==="in"?"tin":"tout")+'">'+(entry.type==="in"?"&#128229; Stock IN":"&#128722; Sale OUT")+'</span><span style="font-size:13px;font-weight:600;color:var(--ink)">'+(entry.type==="in"?"Supplier: "+esc(entry.supplier||"—")+" &middot; ":"")+"Ref: "+esc(entry.ref||"—")+'</span>'+statusBadge+'</div><div style="display:flex;align-items:center;gap:10px"><div style="font-size:12px;color:var(--faint)">'+entry.date+' &middot; by '+esc(entry.by)+'</div>'+reverseBtn+'</div></div><table style="min-width:0"><thead><tr><th>Item</th><th style="width:60px">Qty</th></tr></thead><tbody>'+irows+'</tbody></table></div>';
+    var actions=canDelete?'<button class="btn btnsm edittxnbtn" data-id="'+entry.id+'">&#9998; Edit</button><button class="btn btnsm btnd deltxnbtn" data-id="'+entry.id+'">&#128465; Delete</button>':"";
+    return '<div class="hist-entry"><div class="hist-head"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="hist-type '+(entry.type==="in"?"tin":"tout")+'">'+(entry.type==="in"?"&#128229; Stock IN":"&#128722; Sale OUT")+'</span><span style="font-size:13px;font-weight:600;color:var(--ink)">'+(entry.type==="in"?"Supplier: "+esc(entry.supplier||"—")+" &middot; ":"")+"Ref: "+esc(entry.ref||"—")+'</span></div><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><div style="font-size:12px;color:var(--faint)">'+entry.date+' &middot; by '+esc(entry.by)+'</div>'+actions+'</div></div><table style="min-width:0"><thead><tr><th>Item</th><th style="width:60px">Qty</th></tr></thead><tbody>'+irows+'</tbody></table></div>';
   }).join("");
   tc.innerHTML='<div class="card"><div class="ctitle">Transaction History &mdash; '+esc(ST.storeName)+' <span style="font-size:12px;color:var(--faint);font-weight:400">(latest 300)</span></div><div class="srow"><input type="text" id="histsearch" placeholder="Search by item, date, ref..." value="'+esc(ST.histQ)+'" style="max-width:380px"></div>'+(entries||'<div style="font-size:13px;color:var(--faint);text-align:center;padding:2rem">No transactions found.</div>')+'</div>';
   G("histsearch").oninput=function(){ST.histQ=this.value;renderTab();};
   if(canDelete){
-    tc.querySelectorAll(".reversebtn").forEach(function(btn){
-      btn.onclick=function(){doReverse(this.dataset.id);};
-    });
+    tc.querySelectorAll(".edittxnbtn").forEach(function(btn){btn.onclick=function(){openEditTxn(this.dataset.id);};});
+    tc.querySelectorAll(".deltxnbtn").forEach(function(btn){btn.onclick=function(){doDeleteTxn(this.dataset.id);};});
   }
 }
-async function doReverse(id){
+async function doDeleteTxn(id){
   var entry=ST.hist.find(function(e){return String(e.id)===String(id);});
   if(!entry)return;
-  var action=entry.type==="out"?"add back":"remove";
+  var action=entry.type==="out"?"give back":"remove";
   var summary=entry.items.map(function(it){return esc(it.name)+" ("+it.qty+")";}).join(", ");
-  if(!confirm("Reverse this "+(entry.type==="out"?"Sale":"Stock IN")+" entry?\n\nThis will "+action+": "+summary+"\n\nThe original entry stays visible in History, marked as Reversed."))return;
-  var ok=await dbReverseTransaction(entry);
-  if(ok){toast("Transaction reversed.");await loadStoreData(ST.storeId);ST.tab="history";renderTab();}
+  if(!confirm("Delete this "+(entry.type==="out"?"Sale":"Stock IN")+" entry entirely?\n\nStock will "+action+": "+summary+"\n\nThis cannot be undone."))return;
+  var ok=await dbDeleteTransaction(entry);
+  if(ok){toast("Transaction deleted, stock corrected.");await loadStoreData(ST.storeId);ST.tab="history";renderTab();}
+}
+function openEditTxn(id){
+  var entry=ST.hist.find(function(e){return String(e.id)===String(id);});
+  if(!entry)return;
+  ST.editTxn=entry;
+  renderEditTxnModal();
+}
+function renderEditTxnModal(){
+  var entry=ST.editTxn;if(!entry)return;
+  var rows=entry.items.map(function(it,i){
+    return '<div class="itemrow matched"><div class="iname">'+esc(it.name)+'</div><div class="qty-ctrl"><input type="number" class="qnuminput txteditqty" data-i="'+i+'" value="'+it.qty+'" min="0"></div></div>';
+  }).join("");
+  G("ml").innerHTML='<div class="overlay" id="mloverlay"><div class="modal"><div class="mtitle">Edit '+(entry.type==="out"?"Sale":"Stock IN")+' entry</div><div style="font-size:12.5px;color:var(--muted);margin-bottom:1rem">Change a quantity, or set it to 0 to remove that item from this entry. Stock adjusts automatically to match.</div>'+rows+'<div class="mactions"><button class="btn" id="canceltxnedit">Cancel</button><button class="btn btnp" id="savetxnedit">Save changes</button></div></div></div>';
+  G("mloverlay").onclick=function(e){if(e.target===this)closeTxnEdit();};
+  G("canceltxnedit").onclick=closeTxnEdit;
+  G("savetxnedit").onclick=saveTxnEdit;
+}
+function closeTxnEdit(){ST.editTxn=null;G("ml").innerHTML="";}
+async function saveTxnEdit(){
+  var entry=ST.editTxn;if(!entry)return;
+  var btn=G("savetxnedit");btn.disabled=true;btn.textContent="Saving...";
+  var inputs=document.querySelectorAll(".txteditqty");
+  var editedLines=[];
+  inputs.forEach(function(inp){
+    var i=parseInt(inp.dataset.i);
+    var orig=entry.items[i];
+    var newQty=Math.max(0,parseInt(inp.value)||0);
+    editedLines.push({lineId:orig.id,itemId:orig.itemId,oldQty:orig.qty,newQty:newQty});
+  });
+  await dbEditTransactionLines(entry,editedLines);
+  closeTxnEdit();
+  toast("Entry updated, stock corrected.");
+  await loadStoreData(ST.storeId);
+  ST.tab="history";renderTab();
 }
 
 // ── IMPORT ──
