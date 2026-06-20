@@ -136,17 +136,11 @@ var SUPABASE_URL = "https://buzidwccluskdkccidev.supabase.co";
 var SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ1emlkd2NjbHVza2RrY2NpZGV2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE4NTIzOTcsImV4cCI6MjA5NzQyODM5N30.VrcIV-EXRtFMge2p_f1dvK7l4mwPvHMGRhQfsinD354";
 var sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-var USERS=[
-  {id:1,name:"Owner",role:"owner",pin:"1234"},
-  {id:2,name:"Rahul",role:"staff",pin:"0000"},
-  {id:3,name:"Priya",role:"staff",pin:"1111"}
-];
-
 var TODAYKEY=new Date().toISOString().slice(0,10);
 var TODAY=new Date().toLocaleDateString("en-IN",{weekday:"short",day:"numeric",month:"short",year:"numeric"});
 
 var ST={
-  user:null, stores:[], storeId:null, storeName:"",
+  user:null, users:[], stores:[], storeId:null, storeName:"",
   tab:"inventory", inv:[], hist:[], cart:[],
   modal:null, editItem:null, invQ:"", invCat:"", invPage:1, invPageSize:50,
   siRows:[{id:1,itemId:null,name:"",qty:1}], siSupplier:"", siRef:"", siDate:TODAYKEY,
@@ -164,6 +158,11 @@ async function fetchStores(){
   var {data,error}=await sb.from("stores").select("*").order("name");
   if(error){console.error(error);return [];}
   return data||[];
+}
+async function fetchUsers(){
+  var {data,error}=await sb.from("users").select("*").order("role").order("name");
+  if(error){console.error(error);return [];}
+  return (data||[]).map(function(r){return {id:r.id,name:r.name,role:r.role,pin:String(r.pin),canDelete:r.role==="owner"||!!r.can_delete};});
 }
 async function fetchItems(storeId){
   // Supabase caps each request at its configured max rows (often 1000),
@@ -248,22 +247,21 @@ function renderLogin(){
   var el=document.createElement("div");
   el.className="login-page";
   var opts='<option value="">-- Select --</option>';
-  USERS.forEach(function(u){opts+='<option value="'+u.id+'">'+u.name+' ('+u.role+')</option>';});
+  ST.users.forEach(function(u){opts+='<option value="'+u.id+'">'+esc(u.name)+(u.role==="owner"?" (Owner)":"")+'</option>';});
   var sopts='<option value="">-- Select --</option>';
   ST.stores.forEach(function(s){sopts+='<option value="'+s.id+'">'+esc(s.name)+'</option>';});
   el.innerHTML='<div class="login-box"><div class="login-logo"><div class="login-logo-icon">&#9889;</div><span class="login-logo-name">ShopManager</span></div><div class="login-sub">Synced via Supabase &middot; Balaghat</div>'
     +'<div class="fg"><label>Select user</label><select id="lu">'+opts+'</select></div>'
     +'<div class="fg"><label>Select store</label><select id="ls">'+sopts+'</select></div>'
     +'<div class="fg"><label>PIN</label><input type="password" id="lp" maxlength="6" placeholder="Enter PIN" autocomplete="current-password"></div>'
-    +'<div class="err" id="lerr"></div><button class="btn btnp btnbl" id="loginbtn">Login &rarr;</button>'
-    +'<div style="font-size:11px;color:#aaa;margin-top:1rem;text-align:center">Owner: 1234 &middot; Staff: 0000 or 1111</div></div>';
+    +'<div class="err" id="lerr"></div><button class="btn btnp btnbl" id="loginbtn">Login &rarr;</button></div>';
   G("app").appendChild(el);
   G("loginbtn").onclick=doLogin;
   G("lp").onkeydown=function(e){if(e.key==="Enter")doLogin();};
 }
 async function doLogin(){
-  var uid=parseInt(G("lu").value),pin=(G("lp").value||"").trim(),storeId=G("ls").value;
-  var u=USERS.find(function(x){return x.id===uid&&x.pin===pin;});
+  var uid=G("lu").value,pin=(G("lp").value||"").trim(),storeId=G("ls").value;
+  var u=ST.users.find(function(x){return String(x.id)===String(uid)&&x.pin===pin;});
   if(!u){G("lerr").textContent="Wrong user or PIN.";return;}
   if(!storeId){G("lerr").textContent="Please select a store.";return;}
   ST.user=u;ST.storeId=storeId;
@@ -338,6 +336,7 @@ function openStoreSwitch(){
 // ── INVENTORY ──
 function renderInv(tc){
   var isOwner=ST.user.role==="owner";
+  var canEdit=true; // all logged-in staff can manage stock (add/edit items); delete is gated separately
   var focusInfo=null;
   var active=document.activeElement;
   if(active&&active.id==="invsearch")focusInfo={id:"invsearch",pos:active.selectionStart};
@@ -353,18 +352,18 @@ function renderInv(tc){
   var pageStart=(ST.invPage-1)*pageSize;
   var rows=items.slice(pageStart,pageStart+pageSize).map(function(i){
     var st=i.qty<0?"<span class='badge bdanger'>"+i.qty+"</span>":i.qty===0?"<span class='badge bwarn'>0</span>":"<b>"+i.qty+"</b>";
-    var catCell=isOwner?"<button class='catbtn' data-id='"+i.id+"'>"+(esc(i.cat||"(none)"))+"</button>":"<span class='badge binfo' style='font-size:10px'>"+esc(i.cat||"")+"</span>";
-    var compCell=isOwner?"<button class='compbtn' data-id='"+i.id+"'>"+(esc(i.company||"+ add"))+"</button>":esc(i.company||"—");
-    return "<tr><td style='font-size:12px'>"+esc(i.name)+"</td><td class='catcell' data-id='"+i.id+"'>"+catCell+"</td><td class='compcell' data-id='"+i.id+"'>"+compCell+"</td><td>"+st+"</td><td style='color:#aaa;font-size:12px'>"+esc(i.unit||"Nos")+"</td>"+(isOwner?"<td><button class='btn btnsm editbtn' data-id='"+i.id+"'>Edit</button></td>":"")+"</tr>";
+    var catCell=canEdit?"<button class='catbtn' data-id='"+i.id+"'>"+(esc(i.cat||"(none)"))+"</button>":"<span class='badge binfo' style='font-size:10px'>"+esc(i.cat||"")+"</span>";
+    var compCell=canEdit?"<button class='compbtn' data-id='"+i.id+"'>"+(esc(i.company||"+ add"))+"</button>":esc(i.company||"—");
+    return "<tr><td style='font-size:12px'>"+esc(i.name)+"</td><td class='catcell' data-id='"+i.id+"'>"+catCell+"</td><td class='compcell' data-id='"+i.id+"'>"+compCell+"</td><td>"+st+"</td><td style='color:#aaa;font-size:12px'>"+esc(i.unit||"Nos")+"</td>"+(canEdit?"<td><button class='btn btnsm editbtn' data-id='"+i.id+"'>Edit</button></td>":"")+"</tr>";
   }).join("");
   if(!rows)rows="<tr><td colspan='6' style='text-align:center;color:#aaa;padding:2rem'>No items found.</td></tr>";
   var catopts='<option value="">All categories</option>'+cats.map(function(c){return '<option value="'+esc(c)+'"'+(ST.invCat===c?" selected":"")+">"+esc(c)+"</option>";}).join("");
   var shownFrom=items.length?pageStart+1:0, shownTo=Math.min(pageStart+pageSize,items.length);
   tc.innerHTML='<div class="mgrid"><div class="metric"><div class="mlabel">Total Items</div><div class="mval">'+ST.inv.length.toLocaleString("en-IN")+'</div></div><div class="metric"><div class="mlabel">Negative</div><div class="mval '+(neg>0?"danger":"ok")+'">'+neg+'</div></div><div class="metric"><div class="mlabel">Low Stock</div><div class="mval '+(low>0?"warn":"ok")+'">'+low+'</div></div><div class="metric"><div class="mlabel">Shown</div><div class="mval">'+shownFrom+'&ndash;'+shownTo+' / '+items.length.toLocaleString("en-IN")+'</div></div></div>'
-    +'<div class="card"><div class="ctitle"><span>Inventory &mdash; '+esc(ST.storeName)+'</span>'+(isOwner?"<button class='btn btnp btnsm' id='additembtn'>+ Add item</button>":"")+'</div>'
+    +'<div class="card"><div class="ctitle"><span>Inventory &mdash; '+esc(ST.storeName)+'</span>'+(canEdit?"<button class='btn btnp btnsm' id='additembtn'>+ Add item</button>":"")+'</div>'
     +'<div class="srow"><input type="text" id="invsearch" placeholder="Search items..." value="'+esc(ST.invQ)+'"><select id="catsel" style="max-width:180px">'+catopts+'</select></div>'
-    +(isOwner?'<div style="font-size:11px;color:#999;margin-bottom:6px">Tip: click a category or company to rename it, or type a new one to create it.</div>':"")
-    +'<div class="twrap"><table><thead><tr><th>Item</th><th>Category</th><th>Company</th><th>Qty</th><th>Unit</th>'+(isOwner?"<th></th>":"")+'</tr></thead><tbody>'+rows+'</tbody></table></div>'
+    +(canEdit?'<div style="font-size:11px;color:#999;margin-bottom:6px">Tip: click a category or company to rename it, or type a new one to create it.</div>':"")
+    +'<div class="twrap"><table><thead><tr><th>Item</th><th>Category</th><th>Company</th><th>Qty</th><th>Unit</th>'+(canEdit?"<th></th>":"")+'</tr></thead><tbody>'+rows+'</tbody></table></div>'
     +'<div style="display:flex;align-items:center;justify-content:center;gap:12px;padding:14px 0"><button class="btn btnsm" id="prevpagebtn" '+(ST.invPage<=1?"disabled":"")+'>&larr; Prev</button><span style="font-size:13px;color:#666">Page '+ST.invPage+' of '+totalPages+'</span><button class="btn btnsm" id="nextpagebtn" '+(ST.invPage>=totalPages?"disabled":"")+'>Next &rarr;</button></div>'
     +'</div>';
   G("invsearch").oninput=function(){ST.invQ=this.value;ST.invPage=1;renderInv(tc);};
@@ -375,7 +374,7 @@ function renderInv(tc){
     var el=G(focusInfo.id);
     if(el){el.focus();try{el.setSelectionRange(focusInfo.pos,focusInfo.pos);}catch(e){}}
   }
-  if(isOwner){
+  if(canEdit){
     G("additembtn").onclick=openAdd;
     tc.querySelectorAll(".editbtn").forEach(function(btn){btn.onclick=function(){openEdit(this.dataset.id);};});
     tc.querySelectorAll(".catbtn").forEach(function(btn){btn.onclick=function(){startInlineEdit(this.closest("td"),this.dataset.id,"cat");};});
@@ -869,11 +868,12 @@ function openEdit(id){ST.modal="edit";ST.editItem=Object.assign({},ST.inv.find(f
 function closeModal(){ST.modal=null;ST.editItem=null;G("ml").innerHTML="";}
 function renderModal(){
   var item=ST.editItem;
+  var canDelete=ST.user&&(ST.user.role==="owner"||ST.user.canDelete);
   var cats=[...new Set(ST.inv.map(function(i){return i.cat||""}))].sort();
   var catopts=cats.map(function(c){return '<option value="'+esc(c)+'">'+esc(c)+'</option>';}).join("");
   var comps=[...new Set(ST.inv.map(function(i){return i.company||""}))].filter(Boolean).sort();
   var compopts=comps.map(function(c){return '<option value="'+esc(c)+'">'+esc(c)+'</option>';}).join("");
-  G("ml").innerHTML='<div class="overlay" id="mloverlay"><div class="modal"><div class="mtitle">'+(ST.modal==="add"?"Add new item":"Edit item")+'</div><div class="fgrid"><div class="fg full"><label>Item name</label><input id="finame" value="'+(item?esc(item.name):"")+'" placeholder="Item name"></div><div class="fg"><label>Category</label><input id="ficat" list="catlist" value="'+(item?esc(item.cat||""):"")+'" placeholder="Category"><datalist id="catlist">'+catopts+'</datalist></div><div class="fg"><label>Company / Brand</label><input id="ficomp" list="complist" value="'+(item?esc(item.company||""):"")+'" placeholder="Company / Brand"><datalist id="complist">'+compopts+'</datalist></div><div class="fg"><label>Unit</label><input id="fiunit" value="'+(item?esc(item.unit||"Nos"):"Nos")+'"></div><div class="fg"><label>Current qty</label><input id="fiqty" type="number" value="'+(item?item.qty:0)+'"></div><div class="fg"><label>Min stock alert</label><input id="fimin" type="number" value="'+(item?item.min||0:0)+'"></div></div><div class="mactions">'+(ST.modal==="edit"?'<button class="btn btnd" id="delitembtn">Delete</button>':"")+'<button class="btn" id="cancelmodal">Cancel</button><button class="btn btnp" id="savemodal">Save</button></div></div></div>';
+  G("ml").innerHTML='<div class="overlay" id="mloverlay"><div class="modal"><div class="mtitle">'+(ST.modal==="add"?"Add new item":"Edit item")+'</div><div class="fgrid"><div class="fg full"><label>Item name</label><input id="finame" value="'+(item?esc(item.name):"")+'" placeholder="Item name"></div><div class="fg"><label>Category</label><input id="ficat" list="catlist" value="'+(item?esc(item.cat||""):"")+'" placeholder="Category"><datalist id="catlist">'+catopts+'</datalist></div><div class="fg"><label>Company / Brand</label><input id="ficomp" list="complist" value="'+(item?esc(item.company||""):"")+'" placeholder="Company / Brand"><datalist id="complist">'+compopts+'</datalist></div><div class="fg"><label>Unit</label><input id="fiunit" value="'+(item?esc(item.unit||"Nos"):"Nos")+'"></div><div class="fg"><label>Current qty</label><input id="fiqty" type="number" value="'+(item?item.qty:0)+'"></div><div class="fg"><label>Min stock alert</label><input id="fimin" type="number" value="'+(item?item.min||0:0)+'"></div></div><div class="mactions">'+(ST.modal==="edit"&&canDelete?'<button class="btn btnd" id="delitembtn">Delete</button>':"")+'<button class="btn" id="cancelmodal">Cancel</button><button class="btn btnp" id="savemodal">Save</button></div></div></div>';
   G("mloverlay").onclick=function(e){if(e.target===this)closeModal();};
   G("cancelmodal").onclick=closeModal;
   G("finame").oninput=function(){
@@ -883,7 +883,7 @@ function renderModal(){
       if(guess)compField.value=guess;
     }
   };
-  if(ST.modal==="edit")G("delitembtn").onclick=async function(){
+  if(ST.modal==="edit"&&canDelete)G("delitembtn").onclick=async function(){
     if(!confirm("Delete this item?"))return;
     var ok=await dbDeleteItem(ST.editItem.id);
     if(ok){ST.inv=ST.inv.filter(function(i){return i.id!==ST.editItem.id;});closeModal();renderTab();}
@@ -969,6 +969,7 @@ function closeML(){G("ml").innerHTML="";}
 async function init(){
   G("app").innerHTML='<div class="loadwrap"><span class="spinner"></span> Connecting to Supabase...</div>';
   ST.stores=await fetchStores();
+  ST.users=await fetchUsers();
   render();
 }
 init();
