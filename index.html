@@ -77,6 +77,8 @@ input,select,button,textarea{font-family:inherit;font-size:14px;max-width:100%}
 @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(52,211,153,.55)}70%{box-shadow:0 0 0 6px rgba(52,211,153,0)}100%{box-shadow:0 0 0 0 rgba(52,211,153,0)}}
 .logoutbtn{background:rgba(255,255,255,.1);border:none;color:#fff;border-radius:8px;padding:7px 11px;cursor:pointer;font-size:12px;font-weight:600}
 .logoutbtn:hover{background:rgba(255,255,255,.18)}
+.bellbtn{position:relative;font-size:15px;padding:7px 12px}
+.bellbadge{position:absolute;top:-5px;right:-5px;background:var(--danger);color:#fff;font-size:10px;font-weight:700;min-width:17px;height:17px;border-radius:9px;display:flex;align-items:center;justify-content:center;padding:0 4px;border:2px solid var(--ink)}
 .nav{grid-row:2;grid-column:1;background:#fff;border-right:1px solid var(--line);padding:14px 10px;display:flex;flex-direction:column;gap:2px;position:sticky;top:60px;align-self:start;height:calc(100vh - 60px);overflow-y:auto}
 .navbtn{padding:11px 13px;border:none;background:none;cursor:pointer;font-size:13.5px;font-weight:600;color:var(--muted);border-radius:var(--r-md);text-align:left;display:flex;align-items:center;gap:10px;white-space:nowrap;transition:all .12s}
 .navbtn .nicon{font-size:17px;line-height:1;flex-shrink:0}
@@ -413,14 +415,28 @@ function renderMain(){
   var app=G("app");
   var isOwner=ST.user.role==="owner";
   var cc=ST.cart.length;
+  var alertCount=ST.inv.filter(function(i){return i.qty<0||(i.min>0&&i.qty<=i.min);}).length;
   app.innerHTML='<div class="app"><div class="topbar"><div style="display:flex;align-items:center;gap:10px"><span style="font-size:22px">&#9889;</span><div><div class="topbar-logo">Electric Emporium</div><div class="topbar-date">'+TODAY+'</div></div></div>'
-    +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><button class="storebadge" id="storeswitchbtn"><span class="livepulse'+(ST.loading?" off":"")+'"></span>'+esc(ST.storeName)+' &#9662;</button><span class="'+(isOwner?"obadge":"ubadge")+'">'+(isOwner?"&#128081; ":"")+esc(ST.user.name)+'</span><button class="logoutbtn" id="refreshbtn" title="Refresh from Supabase">&#8635;</button><button class="logoutbtn" id="logoutbtn">Logout</button></div></div>'
+    +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><button class="storebadge" id="storeswitchbtn"><span class="livepulse'+(ST.loading?" off":"")+'"></span>'+esc(ST.storeName)+' &#9662;</button><button class="logoutbtn bellbtn" id="bellbtn" title="Stock alerts">&#128276;'+(alertCount>0?'<span class="bellbadge">'+(alertCount>99?"99+":alertCount)+'</span>':"")+'</button><span class="'+(isOwner?"obadge":"ubadge")+'">'+(isOwner?"&#128081; ":"")+esc(ST.user.name)+'</span><button class="logoutbtn" id="refreshbtn" title="Refresh from Supabase">&#8635;</button><button class="logoutbtn" id="logoutbtn">Logout</button></div></div>'
     +'<div class="nav" id="navarea"></div><div class="content" id="tc"></div></div>';
   G("logoutbtn").onclick=logout;
   G("refreshbtn").onclick=function(){loadStoreData(ST.storeId);};
   G("storeswitchbtn").onclick=openStoreSwitch;
+  G("bellbtn").onclick=openAlertsPanel;
   renderNav();
   renderTab();
+}
+function openAlertsPanel(){
+  var negItems=ST.inv.filter(function(i){return i.qty<0;});
+  var lowItems=ST.inv.filter(function(i){return i.min>0&&i.qty<=i.min&&i.qty>=0;});
+  var rows="";
+  negItems.slice(0,30).forEach(function(i){rows+='<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--line2)"><span style="font-size:13px;font-weight:500">'+esc(i.name)+'</span><span class="badge bdanger">'+i.qty+'</span></div>';});
+  lowItems.slice(0,30).forEach(function(i){rows+='<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--line2)"><span style="font-size:13px;font-weight:500">'+esc(i.name)+'</span><span class="badge bwarn">'+i.qty+' / min '+i.min+'</span></div>';});
+  if(!rows)rows='<div style="color:var(--faint);font-size:13px;text-align:center;padding:1.5rem">No stock alerts right now &mdash; all good.</div>';
+  G("ml").innerHTML='<div class="overlay" id="mloverlay"><div class="modal"><div class="mtitle">Stock alerts</div><div style="font-size:12.5px;color:var(--muted);margin-bottom:.75rem">'+negItems.length+' negative &middot; '+lowItems.length+' at or below minimum</div><div style="max-height:50vh;overflow-y:auto">'+rows+'</div><div class="mactions"><button class="btn" id="closealerts">Close</button><button class="btn btnp" id="gotostock">View in Stock</button></div></div></div>';
+  G("mloverlay").onclick=function(e){if(e.target===this)closeML();};
+  G("closealerts").onclick=closeML;
+  G("gotostock").onclick=function(){closeML();ST.tab="inventory";renderNav();renderTab();};
 }
 function renderNav(){
   var isOwner=ST.user&&ST.user.role==="owner";
