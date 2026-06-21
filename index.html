@@ -217,6 +217,7 @@ var sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
 var TODAYKEY=new Date().toISOString().slice(0,10);
 var TODAY=new Date().toLocaleDateString("en-IN",{weekday:"short",day:"numeric",month:"short",year:"numeric"});
+var UNIT_OPTS=["Nos","Pcs","Mtr","Feet","Box","Roll","Kg","Grams","Set"];
 
 var ST={
   user:null, users:[], stores:[], storeId:null, storeName:"",
@@ -1078,7 +1079,11 @@ function renderModal(){
   var catopts=cats.map(function(c){return '<option value="'+esc(c)+'">'+esc(c)+'</option>';}).join("");
   var comps=[...new Set(ST.inv.map(function(i){return i.company||""}))].filter(Boolean).sort();
   var compopts=comps.map(function(c){return '<option value="'+esc(c)+'">'+esc(c)+'</option>';}).join("");
-  G("ml").innerHTML='<div class="overlay" id="mloverlay"><div class="modal"><div class="mtitle">'+(ST.modal==="add"?"Add new item":"Edit item")+'</div><div class="fgrid"><div class="fg full"><label>Item name</label><input id="finame" value="'+(item?esc(item.name):"")+'" placeholder="Item name"></div><div class="fg"><label>Category</label><input id="ficat" list="catlist" value="'+(item?esc(item.cat||""):"")+'" placeholder="Category"><datalist id="catlist">'+catopts+'</datalist></div><div class="fg"><label>Company / Brand</label><input id="ficomp" list="complist" value="'+(item?esc(item.company||""):"")+'" placeholder="Company / Brand"><datalist id="complist">'+compopts+'</datalist></div><div class="fg"><label>Unit</label><input id="fiunit" value="'+(item?esc(item.unit||"Nos"):"Nos")+'"></div><div class="fg"><label>Current qty</label><input id="fiqty" type="number" value="'+(item?item.qty:0)+'"></div><div class="fg"><label>Min stock alert</label><input id="fimin" type="number" value="'+(item?item.min||0:0)+'"></div></div><div class="mactions">'+(ST.modal==="edit"&&canDelete?'<button class="btn btnd" id="delitembtn">Delete</button>':"")+'<button class="btn" id="cancelmodal">Cancel</button><button class="btn btnp" id="savemodal">Save</button></div></div></div>';
+  var curUnit=item?(item.unit||"Nos"):"Nos";
+  var unitOptsList=UNIT_OPTS.slice();
+  if(curUnit&&unitOptsList.indexOf(curUnit)===-1)unitOptsList.push(curUnit);
+  var unitOpts=unitOptsList.map(function(u){return '<option value="'+esc(u)+'"'+(u===curUnit?" selected":"")+'>'+esc(u)+'</option>';}).join("");
+  G("ml").innerHTML='<div class="overlay" id="mloverlay"><div class="modal"><div class="mtitle">'+(ST.modal==="add"?"Add new item":"Edit item")+'</div><div class="fgrid"><div class="fg full"><label>Item name</label><input id="finame" value="'+(item?esc(item.name):"")+'" placeholder="Item name"></div><div class="fg"><label>Category</label><input id="ficat" list="catlist" value="'+(item?esc(item.cat||""):"")+'" placeholder="Category"><datalist id="catlist">'+catopts+'</datalist></div><div class="fg"><label>Company / Brand</label><input id="ficomp" list="complist" value="'+(item?esc(item.company||""):"")+'" placeholder="Company / Brand"><datalist id="complist">'+compopts+'</datalist></div><div class="fg"><label>Unit</label><select id="fiunit">'+unitOpts+'</select></div><div class="fg"><label>Current qty</label><input id="fiqty" type="number" value="'+(item?item.qty:0)+'"></div><div class="fg"><label>Min stock alert</label><input id="fimin" type="number" value="'+(item?item.min||0:0)+'"></div></div><div class="mactions">'+(ST.modal==="edit"&&canDelete?'<button class="btn btnd" id="delitembtn">Delete</button>':"")+'<button class="btn" id="cancelmodal">Cancel</button><button class="btn btnp" id="savemodal">Save</button></div></div></div>';
   G("mloverlay").onclick=function(e){if(e.target===this)closeModal();};
   G("cancelmodal").onclick=closeModal;
   G("finame").oninput=function(){
