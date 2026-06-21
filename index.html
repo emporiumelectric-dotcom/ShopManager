@@ -78,7 +78,9 @@ input,select,button,textarea{font-family:inherit;font-size:14px;max-width:100%}
 .logoutbtn{background:rgba(255,255,255,.1);border:none;color:#fff;border-radius:8px;padding:7px 11px;cursor:pointer;font-size:12px;font-weight:600}
 .logoutbtn:hover{background:rgba(255,255,255,.18)}
 .nav{grid-row:2;grid-column:1;background:#fff;border-right:1px solid var(--line);padding:14px 10px;display:flex;flex-direction:column;gap:2px;position:sticky;top:60px;align-self:start;height:calc(100vh - 60px);overflow-y:auto}
-.navbtn{padding:11px 13px;border:none;background:none;cursor:pointer;font-size:13.5px;font-weight:600;color:var(--muted);border-radius:var(--r-md);text-align:left;display:flex;align-items:center;white-space:nowrap;transition:all .12s}
+.navbtn{padding:11px 13px;border:none;background:none;cursor:pointer;font-size:13.5px;font-weight:600;color:var(--muted);border-radius:var(--r-md);text-align:left;display:flex;align-items:center;gap:10px;white-space:nowrap;transition:all .12s}
+.navbtn .nicon{font-size:17px;line-height:1;flex-shrink:0}
+.navbtn .nlabel{font-size:13.5px}
 .navbtn.active{color:var(--ink);background:var(--signal-dim)}
 .navbtn:hover:not(.active){color:var(--ink-text);background:var(--line2)}
 .nbadge{background:var(--danger);color:#fff;font-size:10px;font-weight:700;padding:1px 6px;border-radius:10px;margin-left:auto}
@@ -94,9 +96,9 @@ input,select,button,textarea{font-family:inherit;font-size:14px;max-width:100%}
 /* ── cards / tables ── */
 .card{background:#fff;border-radius:var(--r-lg);border:1px solid var(--line);padding:1.4rem;margin-bottom:1.1rem;box-shadow:var(--shadow-sm)}
 .ctitle{font-family:'Space Grotesk',sans-serif;font-size:15px;font-weight:600;color:var(--ink);margin-bottom:1.1rem;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;letter-spacing:-.01em}
-.twrap{overflow-x:auto;border-radius:var(--r-md)}
+.twrap{overflow:auto;border-radius:var(--r-md);max-height:62vh;border:1px solid var(--line2)}
 table{width:100%;border-collapse:collapse;font-size:13.5px;min-width:400px}
-th{text-align:left;font-size:10.5px;font-weight:700;color:var(--faint);text-transform:uppercase;letter-spacing:.06em;padding:10px 12px;border-bottom:1.5px solid var(--line);white-space:nowrap;background:#FAFBFC}
+th{text-align:left;font-size:10.5px;font-weight:700;color:var(--faint);text-transform:uppercase;letter-spacing:.06em;padding:10px 12px;border-bottom:1.5px solid var(--line);white-space:nowrap;background:#FAFBFC;position:sticky;top:0;z-index:5}
 td{padding:10px 12px;border-bottom:1px solid var(--line2);color:var(--ink-text);vertical-align:middle}
 tr:last-child td{border-bottom:none}
 tr:hover td{background:#FAFBFD}
@@ -175,28 +177,31 @@ tr:hover td{background:#FAFBFD}
 @media(max-width:860px){
   .app{grid-template-columns:1fr;grid-template-rows:auto 1fr auto;max-width:100vw;overflow-x:hidden}
   .nav{grid-row:3;grid-column:1;position:fixed;bottom:0;left:0;right:0;height:auto;flex-direction:row;justify-content:space-around;padding:6px 4px calc(6px + env(safe-area-inset-bottom,0px));border-right:none;border-top:1px solid var(--line);z-index:60;box-shadow:0 -4px 16px rgba(0,0,0,.08)}
-  .navbtn{flex:1;flex-direction:column;gap:3px;font-size:10.5px;padding:8px 4px;text-align:center;min-height:52px;justify-content:center;border-radius:10px}
+  .navbtn{flex:1;flex-direction:column;gap:2px;padding:7px 2px;text-align:center;min-height:54px;justify-content:center;border-radius:10px}
+  .navbtn .nicon{font-size:21px}
+  .navbtn .nlabel{font-size:10px;font-weight:700}
   .nbadge{margin-left:0;position:absolute;top:2px;right:14%}
-  .content{grid-row:2;grid-column:1;padding:.85rem .85rem 86px;max-width:100vw;overflow-x:hidden}
+  .content{grid-row:2;grid-column:1;padding:.85rem .85rem 88px;max-width:100vw;overflow-x:hidden}
   .fgrid{grid-template-columns:1fr}.full{grid-column:1}
   .topbar{min-height:56px;padding:9px .85rem}
   .topbar-date{display:none}
-  .toastwrap{left:12px;right:12px;bottom:80px;align-items:stretch}
+  .toastwrap{left:12px;right:12px;bottom:82px;align-items:stretch}
   .toast{max-width:none}
   /* larger touch targets everywhere on mobile */
-  .btn{padding:11px 16px;font-size:13.5px;min-height:42px}
-  .btnsm{padding:9px 13px;font-size:12.5px;min-height:38px}
-  .qbtn{width:36px;height:36px;font-size:19px}
-  .rmbtn{padding:8px 12px;font-size:16px}
-  .qnuminput{width:48px;padding:8px 2px;font-size:15px}
-  .catbtn,.compbtn{padding:6px 11px;font-size:12px}
-  .srow input,.srow select,.fg input,.fg select{padding:12px 14px;font-size:15px}
-  th,td{padding:11px 10px}
-  .ctitle{font-size:15.5px}
-  .logoutbtn{padding:9px 12px;min-height:38px}
-  .storebadge{padding:8px 13px;min-height:38px}
-  .itemrow{padding:11px 12px}
-  table{font-size:13.5px}
+  .btn{padding:13px 18px;font-size:14.5px;min-height:46px;font-weight:700}
+  .btnsm{padding:10px 14px;font-size:13px;min-height:40px}
+  .qbtn{width:38px;height:38px;font-size:20px}
+  .rmbtn{padding:9px 13px;font-size:17px}
+  .qnuminput{width:50px;padding:9px 2px;font-size:15.5px}
+  .catbtn,.compbtn{padding:7px 12px;font-size:12.5px}
+  .srow input,.srow select,.fg input,.fg select{padding:13px 15px;font-size:16px}
+  th,td{padding:12px 11px}
+  .ctitle{font-size:16px}
+  .logoutbtn{padding:10px 13px;min-height:40px}
+  .storebadge{padding:9px 14px;min-height:40px}
+  .itemrow{padding:12px 13px}
+  table{font-size:14px}
+  .twrap{max-height:56vh}
 }
 @media(max-width:380px){
   .navbtn{font-size:9.5px;padding:7px 2px}
@@ -221,7 +226,7 @@ var UNIT_OPTS=["Nos","Pcs","Mtr","Feet","Box","Roll","Kg","Grams","Set"];
 
 var ST={
   user:null, users:[], stores:[], storeId:null, storeName:"",
-  tab:"inventory", inv:[], hist:[], cart:[],
+  tab:"dashboard", inv:[], hist:[], cart:[],
   modal:null, editItem:null, invQ:"", invCat:"", invPage:1, invPageSize:50,
   siRows:[{id:1,itemId:null,name:"",qty:1}], siSupplier:"", siRef:"", siDate:TODAYKEY,
   histQ:"", histFrom:"", histTo:"", loading:false, importStatus:"", switchModalOpen:false, editTxn:null
@@ -398,7 +403,7 @@ async function doLogin(){
   ST.user=u;ST.storeId=storeId;
   var s=ST.stores.find(function(x){return x.id===storeId;});
   ST.storeName=s?s.name:"";
-  ST.tab="inventory";
+  ST.tab="dashboard";
   render();
   await loadStoreData(storeId);
 }
@@ -421,13 +426,13 @@ function renderNav(){
   var isOwner=ST.user&&ST.user.role==="owner";
   var cc=ST.cart.length;
   var nav=G("navarea");if(!nav)return;
-  var navDefs=[{t:"inventory",label:"&#128230; Stock"},{t:"sale",label:"&#128722; Sale",badge:cc>0?cc:0},{t:"stockin",label:"&#128229; Stock IN"},{t:"history",label:"&#128203; History"}];
-  if(isOwner){navDefs.push({t:"import",label:"&#11014; Import"});navDefs.push({t:"reports",label:"&#128202; Reports"});}
+  var navDefs=[{t:"dashboard",icon:"&#127968;",label:"Home"},{t:"inventory",icon:"&#128230;",label:"Stock"},{t:"sale",icon:"&#128722;",label:"Sale",badge:cc>0?cc:0},{t:"stockin",icon:"&#128229;",label:"Stock IN"},{t:"history",icon:"&#128203;",label:"History"}];
+  if(isOwner){navDefs.push({t:"import",icon:"&#11014;",label:"Import"});navDefs.push({t:"reports",icon:"&#128202;",label:"Reports"});}
   nav.innerHTML="";
   navDefs.forEach(function(def){
     var btn=document.createElement("button");
     btn.className="navbtn"+(ST.tab===def.t?" active":"");
-    btn.innerHTML=def.label+(def.badge?"<span class='nbadge'>"+def.badge+"</span>":"");
+    btn.innerHTML='<span class="nicon">'+def.icon+'</span><span class="nlabel">'+def.label+'</span>'+(def.badge?"<span class='nbadge'>"+def.badge+"</span>":"");
     btn.onclick=(function(tab){return function(){ST.tab=tab;renderNav();renderTab();};})(def.t);
     nav.appendChild(btn);
   });
@@ -435,7 +440,8 @@ function renderNav(){
 function renderTab(){
   var tc=G("tc");if(!tc)return;
   if(ST.loading){tc.innerHTML='<div class="loadwrap"><span class="spinner"></span> Loading from Supabase...</div>';return;}
-  if(ST.tab==="inventory")renderInv(tc);
+  if(ST.tab==="dashboard")renderDashboard(tc);
+  else if(ST.tab==="inventory")renderInv(tc);
   else if(ST.tab==="sale")renderSale(tc);
   else if(ST.tab==="stockin")renderSI(tc);
   else if(ST.tab==="history")renderHist(tc);
@@ -457,11 +463,48 @@ function openStoreSwitch(){
       ST.storeId=sid;
       var s=ST.stores.find(function(x){return x.id===sid;});
       ST.storeName=s?s.name:"";
-      ST.cart=[];ST.tab="inventory";
+      ST.cart=[];ST.tab="dashboard";
       renderMain();
       await loadStoreData(sid);
     };
   });
+}
+
+// ── DASHBOARD (landing page) ──
+function renderDashboard(tc){
+  var neg=ST.inv.filter(function(i){return i.qty<0;}).length;
+  var low=ST.inv.filter(function(i){return i.min>0&&i.qty<=i.min;}).length;
+  var todayOut=ST.hist.filter(function(h){return h.type==="out"&&h.date===TODAYKEY;});
+  var todayQtyOut=todayOut.reduce(function(s,h){return s+h.items.reduce(function(s2,it){return s2+it.qty;},0);},0);
+
+  // category-wise quantity sold, computed from the loaded recent history
+  var catSales={};
+  ST.hist.filter(function(h){return h.type==="out";}).forEach(function(h){
+    h.items.forEach(function(it){
+      var invItem=ST.inv.find(function(x){return x.id===it.itemId;});
+      var cat=invItem?(invItem.cat||"OTHER"):"OTHER";
+      catSales[cat]=(catSales[cat]||0)+it.qty;
+    });
+  });
+  var catSorted=Object.entries(catSales).sort(function(a,b){return b[1]-a[1];}).slice(0,8);
+  var maxCat=catSorted.length?catSorted[0][1]:1;
+  var catBars=catSorted.map(function(e){return '<div class="barrow"><div class="barlabel"><span>'+esc(e[0])+'</span><span style="color:var(--faint);font-size:12px">'+e[1].toLocaleString("en-IN")+' sold</span></div><div class="barbg"><div class="barfill" style="width:'+Math.round(e[1]/maxCat*100)+'%"></div></div></div>';}).join("");
+
+  var recent=ST.hist.slice(0,6).map(function(h){
+    var firstItem=h.items[0]?h.items[0].name:"";
+    var more=h.items.length>1?" +"+(h.items.length-1)+" more":"";
+    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--line2)"><div style="min-width:0;display:flex;align-items:center;gap:8px"><span class="badge '+(h.type==="in"?"bok":"bwarn")+'">'+(h.type==="in"?"IN":"OUT")+'</span><span style="font-size:13px;font-weight:500">'+esc(firstItem)+esc(more)+'</span></div><span style="font-size:11.5px;color:var(--faint);white-space:nowrap;margin-left:8px">'+h.date+'</span></div>';
+  }).join("");
+
+  tc.innerHTML='<div class="card" style="background:linear-gradient(135deg,var(--ink),#1c2A52);color:#fff;border:none">'
+    +'<div style="font-family:\'Space Grotesk\',sans-serif;font-size:19px;font-weight:700;margin-bottom:4px">Welcome back, '+esc((ST.user.name||"").split(" ")[0])+'</div>'
+    +'<div style="font-size:13px;opacity:.75">'+esc(ST.storeName)+' &middot; '+TODAY+'</div>'
+    +'<div style="display:flex;gap:10px;margin-top:1.1rem;flex-wrap:wrap"><button class="btn" id="qsale" style="background:var(--gold);color:var(--ink);border-color:var(--gold);font-weight:700">&#128722; New Sale</button><button class="btn" id="qstockin" style="background:rgba(255,255,255,.12);color:#fff;border-color:rgba(255,255,255,.25)">&#128229; Stock IN</button></div></div>'
+    +'<div class="mgrid"><div class="metric"><div class="mlabel">Total Items</div><div class="mval">'+ST.inv.length.toLocaleString("en-IN")+'</div></div><div class="metric"><div class="mlabel">Negative Stock</div><div class="mval '+(neg>0?"danger":"ok")+'">'+neg+'</div></div><div class="metric"><div class="mlabel">Low Stock</div><div class="mval '+(low>0?"warn":"ok")+'">'+low+'</div></div><div class="metric"><div class="mlabel">Sold Today</div><div class="mval">'+todayQtyOut.toLocaleString("en-IN")+'</div></div></div>'
+    +'<div class="card"><div class="ctitle">Sales by category <span style="font-size:12px;color:var(--faint);font-weight:400">(from recent history)</span></div>'+(catBars||'<div style="color:var(--faint);font-size:13px">No sales recorded yet.</div>')+'</div>'
+    +'<div class="card"><div class="ctitle">Recent activity</div>'+(recent||'<div style="color:var(--faint);font-size:13px">No activity yet.</div>')+'</div>';
+  G("qsale").onclick=function(){ST.tab="sale";renderNav();renderTab();};
+  G("qstockin").onclick=function(){ST.tab="stockin";renderNav();renderTab();};
 }
 
 // ── INVENTORY ──
