@@ -228,9 +228,10 @@ var UNIT_OPTS=["Nos","Pcs","Mtr","Feet","Box","Roll","Kg","Grams","Set"];
 
 var ST={
   user:null, users:[], stores:[], storeId:null, storeName:"",
-  tab:"dashboard", inv:[], hist:[], cart:[],
-  modal:null, editItem:null, invQ:"", invCat:"", invPage:1, invPageSize:50,
-  siRows:[{id:1,itemId:null,name:"",qty:1}], siSupplier:"", siRef:"", siDate:TODAYKEY,
+  tab:"dashboard", inv:[], hist:[], cart:[], locations:[], defaultLocId:null,
+  modal:null, editItem:null, invQ:"", invCat:"", invLocId:"", invPage:1, invPageSize:50,
+  siRows:[{id:1,itemId:null,name:"",qty:1}], siSupplier:"", siRef:"", siDate:TODAYKEY, siLocId:null,
+  trRows:[{id:1,itemId:null,name:"",qty:1}], trFromId:null, trToId:null,
   histQ:"", histFrom:"", histTo:"", loading:false, importStatus:"", switchModalOpen:false, editTxn:null
 };
 
@@ -254,6 +255,49 @@ async function fetchStores(){
   if(error){console.error(error);return [];}
   return data||[];
 }
+async function fetchLocations(storeId){
+  var {data,error}=await sb.from("locations").select("*").eq("store_id",storeId).order("is_default",{ascending:false}).order("name");
+  if(error){console.error(error);return [];}
+  return data||[];
+}
+async function dbSetupLocations(storeId){
+  var locs=[
+    {store_id:storeId,name:"Shop",is_default:true},
+    {store_id:storeId,name:"Baju Godown",is_default:false},
+    {store_id:storeId,name:"Mahavir Chowk Godown",is_default:false},
+    {store_id:storeId,name:"Trivedi Godown",is_default:false}
+  ];
+  var {error}=await sb.from("locations").insert(locs);
+  if(error){alert("Error creating locations: "+error.message);return false;}
+  return true;
+}
+// Update per-location stock (upsert). delta can be positive or negative.
+async function dbUpdateLocStock(itemId,locationId,delta){
+  var {data}=await sb.from("item_locations").select("qty").eq("item_id",itemId).eq("location_id",locationId).single();
+  var newQty=(data?Number(data.qty):0)+delta;
+  var {error}=await sb.from("item_locations").upsert({item_id:itemId,location_id:locationId,qty:newQty},{onConflict:"item_id,location_id"});
+  if(error){console.error("loc stock error:",error);}
+}
+// Get per-location qty breakdown for one item
+async function dbGetItemLocQtys(itemId){
+  var {data,error}=await sb.from("item_locations").select("location_id,qty").eq("item_id",itemId);
+  if(error||!data)return {};
+  var map={};data.forEach(function(r){map[r.location_id]=Number(r.qty);});return map;
+}
+// Transfer: moves qty between locations, does NOT change items.qty total
+async function dbTransferStock(fromLocId,toLocId,lines){
+  for(var i=0;i<lines.length;i++){
+    var l=lines[i];
+    await dbUpdateLocStock(l.itemId,fromLocId,-l.qty);
+    await dbUpdateLocStock(l.itemId,toLocId,l.qty);
+  }
+  // Log as a transfer transaction (no stock total change)
+  var {data:txn,error}=await sb.from("transactions").insert({store_id:ST.storeId,type:"transfer",by_user:ST.user.name,txn_date:TODAYKEY,from_location_id:fromLocId,to_location_id:toLocId}).select().single();
+  if(error){console.error(error);return false;}
+  var payload=lines.map(function(l){return{transaction_id:txn.id,item_id:l.itemId,item_name:l.name,qty:l.qty};});
+  await sb.from("transaction_items").insert(payload);
+  return true;
+}
 async function fetchUsers(){
   var {data,error}=await sb.from("users").select("*").order("role").order("name");
   if(error){console.error(error);return [];}
@@ -274,18 +318,27 @@ async function fetchItems(storeId){
   return all.map(rowToItem);
 }
 async function fetchHistory(storeId){
-  var {data,error}=await sb.from("transactions").select("*, transaction_items(*)").eq("store_id",storeId).order("created_at",{ascending:false}).limit(300);
+  var {data,error}=await sb.from("transactions").select("*, transaction_items(*), from_loc:from_location_id(name), to_loc:to_location_id(name)").eq("store_id",storeId).order("created_at",{ascending:false}).limit(300);
   if(error){console.error(error);return [];}
   return data.map(function(t){
     return {id:t.id,type:t.type,ref:t.ref||"—",supplier:t.supplier||"—",date:t.txn_date,by:t.by_user||"—",
-      items:(t.transaction_items||[]).map(function(li){return{id:li.id,itemId:li.item_id,name:li.item_name,qty:Number(li.qty)};})};
+      fromLoc:t.from_loc?t.from_loc.name:null,toLoc:t.to_loc?t.to_loc.name:null,
+      items:(t.transaction_items||[]).map(function(li){return{id:li.id,itemId:li.item_id,name:li.item_name,qty:Number(li.qty),locationId:li.location_id};})};
   });
 }
 async function loadStoreData(storeId){
   ST.loading=true;render();
   var items=await fetchItems(storeId);
   var hist=await fetchHistory(storeId);
-  ST.inv=items;ST.hist=hist;ST.loading=false;
+  var locs=await fetchLocations(storeId);
+  ST.inv=items;ST.hist=hist;
+  ST.locations=locs;
+  var def=locs.find(function(l){return l.is_default;})||locs[0]||null;
+  ST.defaultLocId=def?def.id:null;
+  if(!ST.siLocId)ST.siLocId=ST.defaultLocId;
+  if(!ST.trFromId)ST.trFromId=ST.defaultLocId;
+  if(!ST.trToId&&locs.length>1)ST.trToId=locs[1].id;
+  ST.loading=false;
   render();
 }
 
@@ -315,7 +368,7 @@ async function dbRecordTransaction(type,meta,lines,extra){
   var payload0=Object.assign({store_id:ST.storeId,type:type,ref:meta.ref||null,supplier:meta.supplier||null,txn_date:meta.date,by_user:ST.user.name},extra||{});
   var {data:txn,error}=await sb.from("transactions").insert(payload0).select().single();
   if(error){alert("Error saving transaction: "+error.message);return false;}
-  var payload=lines.map(function(l){return{transaction_id:txn.id,item_id:l.itemId,item_name:l.name,qty:l.qty};});
+  var payload=lines.map(function(l){return{transaction_id:txn.id,item_id:l.itemId,item_name:l.name,qty:l.qty,location_id:l.locationId||null};});
   var {error:e2}=await sb.from("transaction_items").insert(payload);
   if(e2){alert("Error saving line items: "+e2.message);return false;}
   for(var i=0;i<lines.length;i++){
@@ -324,6 +377,11 @@ async function dbRecordTransaction(type,meta,lines,extra){
     var newQty=type==="out"?item.qty-l.qty:item.qty+l.qty;
     await sb.from("items").update({qty:newQty,updated_at:new Date().toISOString()}).eq("id",l.itemId);
     item.qty=newQty;
+    // Update per-location stock if location is set
+    if(l.locationId){
+      var locDelta=type==="out"?-l.qty:l.qty;
+      await dbUpdateLocStock(l.itemId,l.locationId,locDelta);
+    }
   }
   return true;
 }
@@ -442,7 +500,7 @@ function renderNav(){
   var isOwner=ST.user&&ST.user.role==="owner";
   var cc=ST.cart.length;
   var nav=G("navarea");if(!nav)return;
-  var navDefs=[{t:"dashboard",icon:"&#127968;",label:"Home"},{t:"inventory",icon:"&#128230;",label:"Stock"},{t:"sale",icon:"&#128722;",label:"Sale",badge:cc>0?cc:0},{t:"stockin",icon:"&#128229;",label:"Stock IN"},{t:"history",icon:"&#128203;",label:"History"}];
+  var navDefs=[{t:"dashboard",icon:"&#127968;",label:"Home"},{t:"inventory",icon:"&#128230;",label:"Stock"},{t:"sale",icon:"&#128722;",label:"Sale",badge:cc>0?cc:0},{t:"stockin",icon:"&#128229;",label:"Stock IN"},{t:"transfer",icon:"&#8651;",label:"Transfer"},{t:"history",icon:"&#128203;",label:"History"}];
   if(isOwner){navDefs.push({t:"import",icon:"&#11014;",label:"Import"});navDefs.push({t:"reports",icon:"&#128202;",label:"Reports"});}
   nav.innerHTML="";
   navDefs.forEach(function(def){
@@ -460,6 +518,7 @@ function renderTab(){
   else if(ST.tab==="inventory")renderInv(tc);
   else if(ST.tab==="sale")renderSale(tc);
   else if(ST.tab==="stockin")renderSI(tc);
+  else if(ST.tab==="transfer")renderTransfer(tc);
   else if(ST.tab==="history")renderHist(tc);
   else if(ST.tab==="import")renderImport(tc);
   else if(ST.tab==="reports")renderReports(tc);
@@ -670,10 +729,39 @@ function onCartSearch(val){
   });
   ac.classList.remove("hidden");
 }
+function renderCartBody(){
+  var cb=G("cartbody");if(!cb)return;
+  var hasLocs=ST.locations.length>0;
+  if(ST.cart.length===0){
+    cb.innerHTML='<div style="text-align:center;padding:2.5rem 1rem;color:var(--faint);font-size:13px"><div style="font-size:3rem;margin-bottom:8px">&#128722;</div>Cart is empty. Search for items below.</div>';
+    return;
+  }
+  var banner=document.createElement("div");
+  banner.className="cart-banner";
+  banner.innerHTML='<div><div class="cart-info">&#128722; '+ST.cart.length+' item(s) in cart</div><div class="cart-sub">Submit to deduct stock from selected location.</div></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btnsm" id="cartclearbtn">Clear</button><button class="btn btnsm btns" id="cartsubmitbtn">Submit &amp; deduct &rarr;</button></div>';
+  cb.innerHTML="";cb.appendChild(banner);
+  G("cartclearbtn").onclick=cartClear;
+  G("cartsubmitbtn").onclick=openSubmitCart;
+  ST.cart.forEach(function(row,i){
+    var inv=row.itemId?ST.inv.find(function(x){return x.id===row.itemId;}):null;
+    var locOpts=ST.locations.map(function(l){return '<option value="'+l.id+'"'+(l.id===row.locationId?" selected":"")+'>'+esc(l.name)+'</option>';}).join("");
+    var locSel=hasLocs?'<select class="cartlocsel" data-i="'+i+'" style="font-size:12px;padding:4px 8px;border:1.5px solid var(--line);border-radius:6px;max-width:140px">'+locOpts+'</select>':"";
+    var div=document.createElement("div");
+    div.className="itemrow matched";
+    div.innerHTML='<div style="flex:1;min-width:0"><div class="iname">'+esc(row.name)+'</div><div style="display:flex;gap:8px;align-items:center;margin-top:4px;flex-wrap:wrap">'+locSel+(inv?'<span style="font-size:11px;font-weight:600;color:'+(inv.qty>=0?"var(--ok)":"var(--danger)")+'">Total: '+inv.qty+'</span>':"")+'</div></div><div class="qty-ctrl"><button class="qbtn qminus" data-i="'+i+'">&#8722;</button><input type="number" class="qnuminput" data-i="'+i+'" value="'+row.qty+'" min="1"><button class="qbtn qplus" data-i="'+i+'">+</button></div><button class="rmbtn rmcart" data-i="'+i+'">&#215;</button>';
+    cb.appendChild(div);
+    div.querySelector(".qminus").onclick=function(){cartQty(parseInt(this.dataset.i),-1);};
+    div.querySelector(".qplus").onclick=function(){cartQty(parseInt(this.dataset.i),1);};
+    div.querySelector(".qnuminput").oninput=function(){var idx=parseInt(this.dataset.i);if(ST.cart[idx])ST.cart[idx].qty=parseInt(this.value)||0;};
+    div.querySelector(".qnuminput").onblur=function(){var idx=parseInt(this.dataset.i);if(ST.cart[idx])ST.cart[idx].qty=Math.max(1,ST.cart[idx].qty||1);renderCartBody();};
+    div.querySelector(".rmcart").onclick=function(){cartRemove(parseInt(this.dataset.i));};
+    if(hasLocs&&div.querySelector(".cartlocsel"))div.querySelector(".cartlocsel").onchange=function(){var idx=parseInt(this.dataset.i);if(ST.cart[idx])ST.cart[idx].locationId=parseInt(this.value)||null;};
+  });
+}
 function addToCart(itemId){
   var inv=ST.inv.find(function(i){return i.id===itemId;});if(!inv)return;
   var ex=ST.cart.find(function(r){return r.itemId===itemId;});
-  if(ex){ex.qty++;}else{ST.cart.push({itemId:itemId,name:inv.name,cat:inv.cat,qty:1});}
+  if(ex){ex.qty++;}else{ST.cart.push({itemId:itemId,name:inv.name,cat:inv.cat,qty:1,locationId:ST.defaultLocId});}
   var ac=G("cartac");if(ac)ac.classList.add("hidden");
   var cs=G("cartsearch");if(cs)cs.value="";
   renderCartBody();renderNav();
@@ -684,13 +772,15 @@ function cartClear(){if(!confirm("Clear all "+ST.cart.length+" items?"))return;S
 function openSubmitCart(){
   if(!ST.cart.length){alert("Cart is empty.");return;}
   var ml=G("ml");
+  var hasLocs=ST.locations.length>0;
   var rows=ST.cart.map(function(r){
     var inv=ST.inv.find(function(i){return i.id===r.itemId;});
     var after=inv?inv.qty-r.qty:"?";
-    var col=typeof after==="number"&&after<0?"color:#c62828;font-weight:700":"";
-    return "<tr><td style='font-size:12px'>"+esc(r.name)+"</td><td>"+r.qty+"</td><td style='"+col+"'>"+after+"</td></tr>";
+    var col=typeof after==="number"&&after<0?"color:var(--danger);font-weight:700":"";
+    var locName=hasLocs?(ST.locations.find(function(l){return l.id===r.locationId;})||ST.locations[0]||{name:"Shop"}):null;
+    return "<tr><td style='font-size:12px'>"+esc(r.name)+"</td>"+(hasLocs?"<td style='font-size:12px;color:var(--muted)'>"+esc(locName?locName.name:"Shop")+"</td>":"")+"<td>"+r.qty+"</td><td style='"+col+"'>"+after+"</td></tr>";
   }).join("");
-  ml.innerHTML='<div class="overlay" id="mloverlay"><div class="modal"><div class="mtitle">Confirm Sale &mdash; Deduct Stock</div><div style="font-size:13px;color:#666;margin-bottom:1rem">'+ST.cart.length+' item(s) will be deducted from '+esc(ST.storeName)+'.</div><div class="fg"><label>Bill / Ref no.</label><input id="sref" placeholder="e.g. 1042 or customer name"></div><div class="fg"><label>Date</label><input id="sdate" type="date" value="'+TODAYKEY+'"></div><div class="twrap" style="max-height:240px;overflow-y:auto;margin-bottom:1rem"><table><thead><tr><th>Item</th><th>Qty</th><th>After</th></tr></thead><tbody>'+rows+'</tbody></table></div><div class="mactions"><button class="btn" id="cancelsubmit">Cancel</button><button class="btn btns" id="confirmsubmit">&#10003; Confirm &amp; deduct</button></div></div></div>';
+  ml.innerHTML='<div class="overlay" id="mloverlay"><div class="modal"><div class="mtitle">Confirm Sale &mdash; Deduct Stock</div><div style="font-size:13px;color:var(--muted);margin-bottom:1rem">'+ST.cart.length+' item(s) will be deducted from their selected locations.</div><div class="fg"><label>Bill / Ref no.</label><input id="sref" placeholder="e.g. 1042 or customer name"></div><div class="fg"><label>Date</label><input id="sdate" type="date" value="'+TODAYKEY+'"></div><div class="twrap" style="max-height:240px;overflow-y:auto;margin-bottom:1rem"><table><thead><tr><th>Item</th>'+( hasLocs?"<th>Location</th>":"")+'<th>Qty</th><th>After</th></tr></thead><tbody>'+rows+'</tbody></table></div><div class="mactions"><button class="btn" id="cancelsubmit">Cancel</button><button class="btn btns" id="confirmsubmit">&#10003; Confirm &amp; deduct</button></div></div></div>';
   G("mloverlay").onclick=function(e){if(e.target===this)closeML();};
   G("cancelsubmit").onclick=closeML;
   G("confirmsubmit").onclick=doSubmitCart;
@@ -699,7 +789,8 @@ async function doSubmitCart(){
   var btn=G("confirmsubmit");btn.disabled=true;btn.textContent="Saving...";
   var ref=(G("sref")||{}).value||"";
   var date=(G("sdate")||{}).value||TODAYKEY;
-  var ok=await dbRecordTransaction("out",{ref:ref,date:date},ST.cart);
+  var lines=ST.cart.map(function(r){return Object.assign({},r,{locationId:r.locationId||ST.defaultLocId||null});});
+  var ok=await dbRecordTransaction("out",{ref:ref,date:date},lines);
   if(!ok){btn.disabled=false;btn.textContent="\u2713 Confirm & deduct";return;}
   var count=ST.cart.length;ST.cart=[];closeML();
   await loadStoreData(ST.storeId);
@@ -708,15 +799,18 @@ async function doSubmitCart(){
 
 // ── STOCK IN ──
 function renderSI(tc){
+  var locOpts=ST.locations.map(function(l){return '<option value="'+l.id+'"'+(l.id===ST.siLocId?" selected":"")+'>'+esc(l.name)+'</option>';}).join("");
+  var locSel=ST.locations.length?'<div class="fg"><label>Received at</label><select id="silocsel">'+locOpts+'</select></div>':'';
   tc.innerHTML='<div class="card"><div class="ctitle">&#128229; Record Stock IN &mdash; '+esc(ST.storeName)+'</div>'
-    +'<div class="fgrid"><div class="fg"><label>Supplier</label><input id="sisup" placeholder="e.g. Havells India" value="'+esc(ST.siSupplier)+'"></div><div class="fg"><label>Bill / Challan no.</label><input id="siref" placeholder="e.g. INV-001" value="'+esc(ST.siRef)+'"></div><div class="fg"><label>Date</label><input id="sidate" type="date" value="'+ST.siDate+'"></div></div>'
-    +'<div style="font-size:13px;font-weight:600;color:#333;margin:1rem 0 8px">Items received:</div>'
+    +'<div class="fgrid"><div class="fg"><label>Supplier</label><input id="sisup" placeholder="e.g. Havells India" value="'+esc(ST.siSupplier)+'"></div><div class="fg"><label>Bill / Challan no.</label><input id="siref" placeholder="e.g. INV-001" value="'+esc(ST.siRef)+'"></div><div class="fg"><label>Date</label><input id="sidate" type="date" value="'+ST.siDate+'"></div>'+locSel+'</div>'
+    +'<div style="font-size:13px;font-weight:600;color:var(--ink-text);margin:1rem 0 8px">Items received:</div>'
     +'<div id="sirows"></div>'
     +'<button class="btn btnsm" id="addsirow" style="margin-top:8px">+ Add item</button>'
     +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:1.25rem;flex-wrap:wrap"><button class="btn" id="clearsi">Clear</button><button class="btn btns" id="savesi">&#10003; Save &amp; add to stock</button></div></div>';
   G("sisup").oninput=function(){ST.siSupplier=this.value;};
   G("siref").oninput=function(){ST.siRef=this.value;};
   G("sidate").oninput=function(){ST.siDate=this.value;};
+  if(G("silocsel"))G("silocsel").onchange=function(){ST.siLocId=parseInt(this.value)||null;};
   G("addsirow").onclick=function(){ST.siRows.push({id:Date.now(),itemId:null,name:"",qty:1});renderSIRows();};
   G("clearsi").onclick=clearSI;
   G("savesi").onclick=saveSI;
@@ -764,16 +858,99 @@ function onSISearch(val,rowId){
   ac.classList.remove("hidden");
 }
 function siQD(rowId,d){var r=ST.siRows.find(function(x){return x.id===rowId;});if(r)r.qty=Math.max(1,r.qty+d);renderSIRows();}
-function clearSI(){ST.siRows=[{id:Date.now(),itemId:null,name:"",qty:1}];ST.siSupplier="";ST.siRef="";ST.siDate=TODAYKEY;renderTab();}
+function clearSI(){ST.siRows=[{id:Date.now(),itemId:null,name:"",qty:1}];ST.siSupplier="";ST.siRef="";ST.siDate=TODAYKEY;ST.siLocId=ST.defaultLocId;renderTab();}
 async function saveSI(){
   var valid=ST.siRows.filter(function(r){return r.itemId&&r.qty>0;});
   if(!valid.length){alert("Add at least one item.");return;}
   var btn=G("savesi");btn.disabled=true;btn.textContent="Saving...";
-  var ok=await dbRecordTransaction("in",{supplier:ST.siSupplier,ref:ST.siRef,date:ST.siDate},valid);
+  // Attach the selected location to every line
+  var lines=valid.map(function(r){return Object.assign({},r,{locationId:ST.siLocId||null});});
+  var locName=ST.locations.find(function(l){return l.id===ST.siLocId;});
+  var ok=await dbRecordTransaction("in",{supplier:ST.siSupplier,ref:ST.siRef,date:ST.siDate,location_id:ST.siLocId||null},lines);
   if(!ok){btn.disabled=false;btn.textContent="\u2713 Save & add to stock";return;}
   await loadStoreData(ST.storeId);
-  toast("Stock IN recorded — "+valid.length+" item(s) added.");
+  toast("Stock IN recorded"+(locName?" at "+locName.name:"")+". "+valid.length+" item(s) added.");
   clearSI();
+}
+
+// ── TRANSFER ──
+function renderTransfer(tc){
+  if(!ST.locations.length){
+    tc.innerHTML='<div class="card"><div class="ctitle">&#8651; Transfer stock</div><div style="color:var(--muted);font-size:13px">No locations set up yet. Go to <b>Import</b> tab &rarr; Setup Locations first.</div></div>';
+    return;
+  }
+  var locOpts=ST.locations.map(function(l){return '<option value="'+l.id+'">'+esc(l.name)+'</option>';}).join("");
+  var fromOpts=ST.locations.map(function(l){return '<option value="'+l.id+'"'+(l.id===ST.trFromId?" selected":"")+'>'+esc(l.name)+'</option>';}).join("");
+  var toOpts=ST.locations.map(function(l){return '<option value="'+l.id+'"'+(l.id===ST.trToId?" selected":"")+'>'+esc(l.name)+'</option>';}).join("");
+  tc.innerHTML='<div class="card"><div class="ctitle">&#8651; Transfer stock between locations</div>'
+    +'<div class="fgrid"><div class="fg"><label>From</label><select id="trfrom">'+fromOpts+'</select></div><div class="fg"><label>To</label><select id="trto">'+toOpts+'</select></div></div>'
+    +'<div style="font-size:13px;font-weight:600;color:var(--ink-text);margin:1rem 0 8px">Items to transfer:</div>'
+    +'<div id="trrows"></div>'
+    +'<button class="btn btnsm" id="addtrrow" style="margin-top:8px">+ Add item</button>'
+    +'<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:1.25rem"><button class="btn" id="cleartr">Clear</button><button class="btn btnp" id="savetr">&#8651; Transfer</button></div></div>';
+  G("trfrom").onchange=function(){ST.trFromId=parseInt(this.value)||null;};
+  G("trto").onchange=function(){ST.trToId=parseInt(this.value)||null;};
+  G("addtrrow").onclick=function(){ST.trRows.push({id:Date.now(),itemId:null,name:"",qty:1});renderTrRows();};
+  G("cleartr").onclick=function(){ST.trRows=[{id:Date.now(),itemId:null,name:"",qty:1}];renderTab();};
+  G("savetr").onclick=doTransfer;
+  renderTrRows();
+}
+function renderTrRows(){
+  var wrap=G("trrows");if(!wrap)return;
+  wrap.innerHTML="";
+  ST.trRows.forEach(function(row){
+    var div=document.createElement("div");
+    div.className="itemrow"+(row.itemId?" matched":"");
+    div.id="trr"+row.id;
+    div.innerHTML='<div style="position:relative;flex:1;min-width:0"><input type="text" class="trinput" data-rowid="'+row.id+'" placeholder="Type item name..." value="'+esc(row.name)+'" autocomplete="off" style="width:100%;padding:7px 10px;border:1.5px solid var(--line);border-radius:7px;font-size:13px"><div id="trac'+row.id+'" class="aclist hidden"></div></div><div class="qty-ctrl" style="margin-left:4px"><button class="qbtn trminus" data-rowid="'+row.id+'">&#8722;</button><input type="number" class="qnuminput trqtyinput" data-rowid="'+row.id+'" value="'+row.qty+'" min="1"><button class="qbtn trplus" data-rowid="'+row.id+'">+</button></div>'+(ST.trRows.length>1?'<button class="rmbtn trrem" data-rowid="'+row.id+'">&#215;</button>':"");
+    wrap.appendChild(div);
+    var inp=div.querySelector(".trinput");
+    inp.oninput=function(){onTrSearch(this.value,parseInt(this.dataset.rowid));};
+    inp.onfocus=function(){onTrSearch(this.value,parseInt(this.dataset.rowid));};
+    inp.onblur=function(){var rid=parseInt(this.dataset.rowid);setTimeout(function(){var ac=G("trac"+rid);if(ac)ac.classList.add("hidden");},200);};
+    div.querySelector(".trminus").onclick=function(){trQD(parseInt(this.dataset.rowid),-1);};
+    div.querySelector(".trplus").onclick=function(){trQD(parseInt(this.dataset.rowid),1);};
+    div.querySelector(".trqtyinput").oninput=function(){var rid=parseInt(this.dataset.rowid);var r=ST.trRows.find(function(x){return x.id===rid;});if(r)r.qty=parseInt(this.value)||0;};
+    div.querySelector(".trqtyinput").onblur=function(){var rid=parseInt(this.dataset.rowid);var r=ST.trRows.find(function(x){return x.id===rid;});if(r)r.qty=Math.max(1,r.qty||1);renderTrRows();};
+    if(ST.trRows.length>1)div.querySelector(".trrem").onclick=function(){var rid=parseInt(this.dataset.rowid);ST.trRows=ST.trRows.filter(function(r){return r.id!==rid;});renderTrRows();};
+  });
+}
+function onTrSearch(val,rowId){
+  var ac=G("trac"+rowId);if(!ac)return;
+  var q=val.trim().toLowerCase();
+  if(!q){ac.classList.add("hidden");return;}
+  var res=ST.inv.filter(function(i){return i.name.toLowerCase().includes(q);}).slice(0,12);
+  if(!res.length){ac.classList.add("hidden");return;}
+  ac.innerHTML="";
+  res.forEach(function(i){
+    var div=document.createElement("div");
+    div.className="acitem";
+    div.innerHTML="<div>"+esc(i.name)+"</div><div class='accat'>"+esc(i.cat||"")+" &middot; Total: "+i.qty+"</div>";
+    div.onmousedown=(function(item,rid){return function(){
+      var row=ST.trRows.find(function(r){return r.id===rid;});
+      if(row){row.itemId=item.id;row.name=item.name;}
+      var ac2=G("trac"+rid);if(ac2)ac2.classList.add("hidden");
+      renderTrRows();
+    };})(i,rowId);
+    ac.appendChild(div);
+  });
+  ac.classList.remove("hidden");
+}
+function trQD(rowId,d){var r=ST.trRows.find(function(x){return x.id===rowId;});if(r)r.qty=Math.max(1,r.qty+d);renderTrRows();}
+async function doTransfer(){
+  if(!ST.trFromId||!ST.trToId){alert("Select both From and To locations.");return;}
+  if(ST.trFromId===ST.trToId){alert("From and To locations must be different.");return;}
+  var valid=ST.trRows.filter(function(r){return r.itemId&&r.qty>0;});
+  if(!valid.length){alert("Add at least one item.");return;}
+  var btn=G("savetr");btn.disabled=true;btn.textContent="Transferring...";
+  var fromLoc=ST.locations.find(function(l){return l.id===ST.trFromId;});
+  var toLoc=ST.locations.find(function(l){return l.id===ST.trToId;});
+  var ok=await dbTransferStock(ST.trFromId,ST.trToId,valid);
+  if(!ok){toast("Transfer failed.",true);btn.disabled=false;btn.textContent="\u8651 Transfer";return;}
+  ST.trRows=[{id:Date.now(),itemId:null,name:"",qty:1}];
+  await loadStoreData(ST.storeId);
+  toast(valid.length+" item(s) transferred from "+(fromLoc?fromLoc.name:"?")+" to "+(toLoc?toLoc.name:"?")+".");
+  ST.tab="transfer";renderNav();renderTab();
 }
 
 // ── HISTORY ──
@@ -789,8 +966,12 @@ function renderHist(tc){
   });
   var entries=h.slice(0,80).map(function(entry){
     var irows=entry.items.map(function(it){return "<tr><td style='font-size:12px'>"+esc(it.name)+"</td><td style='font-size:12px'>"+it.qty+"</td></tr>";}).join("");
-    var actions=canDelete?'<button class="btn btnsm edittxnbtn" data-id="'+entry.id+'">&#9998; Edit</button><button class="btn btnsm btnd deltxnbtn" data-id="'+entry.id+'">&#128465; Delete</button>':"";
-    return '<div class="hist-entry"><div class="hist-head"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="hist-type '+(entry.type==="in"?"tin":"tout")+'">'+(entry.type==="in"?"&#128229; Stock IN":"&#128722; Sale OUT")+'</span><span style="font-size:13px;font-weight:600;color:var(--ink)">'+(entry.type==="in"?"Supplier: "+esc(entry.supplier||"—")+" &middot; ":"")+"Ref: "+esc(entry.ref||"—")+'</span></div><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><div style="font-size:12px;color:var(--faint)">'+entry.date+' &middot; by '+esc(entry.by)+'</div>'+actions+'</div></div><table style="min-width:0"><thead><tr><th>Item</th><th style="width:60px">Qty</th></tr></thead><tbody>'+irows+'</tbody></table></div>';
+    var isTransfer=entry.type==="transfer";
+    var typeLabel=isTransfer?"&#8651; Transfer":entry.type==="in"?"&#128229; Stock IN":"&#128722; Sale OUT";
+    var typeClass=isTransfer?"binfo":entry.type==="in"?"tin":"tout";
+    var meta=isTransfer?("From: "+esc(entry.fromLoc||"?")+" &rarr; To: "+esc(entry.toLoc||"?")):(entry.type==="in"?"Supplier: "+esc(entry.supplier||"—")+" &middot; Ref: "+esc(entry.ref||"—"):"Ref: "+esc(entry.ref||"—"));
+    var actions=(!isTransfer&&canDelete)?'<button class="btn btnsm edittxnbtn" data-id="'+entry.id+'">&#9998; Edit</button><button class="btn btnsm btnd deltxnbtn" data-id="'+entry.id+'">&#128465; Delete</button>':"";
+    return '<div class="hist-entry"><div class="hist-head"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="hist-type '+typeClass+'">'+typeLabel+'</span><span style="font-size:13px;font-weight:600;color:var(--ink)">'+meta+'</span></div><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><div style="font-size:12px;color:var(--faint)">'+entry.date+' &middot; by '+esc(entry.by)+'</div>'+actions+'</div></div><table style="min-width:0"><thead><tr><th>Item</th><th style="width:60px">Qty</th></tr></thead><tbody>'+irows+'</tbody></table></div>';
   }).join("");
   var hasFilter=ST.histFrom||ST.histTo;
   tc.innerHTML='<div class="card"><div class="ctitle">Transaction History &mdash; '+esc(ST.storeName)+' <span style="font-size:12px;color:var(--faint);font-weight:400">('+h.length+' of latest 300'+(hasFilter?", filtered":"")+')</span></div>'
@@ -981,15 +1162,39 @@ function guessCategory(name){
 function renderImport(tc){
   var uncategorized=ST.inv.filter(function(i){return!i.cat||i.cat==="IMPORTED";});
   var noCompany=ST.inv.filter(function(i){return!i.company;});
-  tc.innerHTML='<div class="card"><div class="ctitle">&#11014; One-time setup: load your inventory</div><div style="font-size:13px;color:#666;margin-bottom:1rem">Loads your real ~2,786-item Electric Emporium list into Supabase. Safe to run more than once &mdash; items already in the store (matched by name) are automatically skipped, so only genuinely new items get added.</div><button class="btn btnp" id="seedbtn">Load inventory into '+esc(ST.storeName)+'</button><div id="seedstatus" style="margin-top:1rem"></div></div>'
-    +'<div class="card"><div class="ctitle">&#127991; Auto-categorize items</div><div style="font-size:13px;color:#666;margin-bottom:1rem">'+uncategorized.length+' item(s) in '+esc(ST.storeName)+' are filed under "IMPORTED" or have no category. This reads each name and assigns a proper category (brand or product type) based on patterns &mdash; preview before anything changes, and you can always fix individual items afterward via Edit.</div>'+(uncategorized.length?'<button class="btn btnp" id="catpreviewbtn">Preview categorization</button>':"<div style='color:#aaa;font-size:13px'>Nothing to categorize right now.</div>")+'<div id="catstatus" style="margin-top:1rem"></div></div>'
-    +'<div class="card"><div class="ctitle">&#127970; Auto-detect company / brand</div><div style="font-size:13px;color:#666;margin-bottom:1rem">'+noCompany.length+' item(s) in '+esc(ST.storeName)+' have no company set. This reads each name and guesses the brand &mdash; either from the brand being written in the name, or from a known model code (e.g. DX3 &rarr; Legrand, MT8 &rarr; Indoasian). Preview before anything changes; items it can\'t confidently guess are left blank for you to fill in via Edit or by clicking the Company cell.</div>'+(noCompany.length?'<button class="btn btnp" id="comppreviewbtn">Preview company detection</button>':"<div style='color:#aaa;font-size:13px'>Nothing to detect right now.</div>")+'<div id="compstatus" style="margin-top:1rem"></div></div>'
-    +'<div class="card"><div class="ctitle">&#11014; Re-import from TallyPrime</div><div style="font-size:13px;color:#666;margin-bottom:1.5rem">Export Stock Summary from TallyPrime as <b>Excel (.xlsx)</b>, upload here. Matches by item name within '+esc(ST.storeName)+' and updates quantities.</div><div class="import-zone" id="importzone"><div style="font-size:2.5rem;margin-bottom:8px">&#128193;</div><div style="font-weight:600;color:#1a237e">Click to select TallyPrime Excel export</div><input type="file" id="impfile" accept=".xlsx,.xls,.csv" style="display:none"></div><div id="impstatus" style="margin-top:1rem"></div></div>';
+  var locsReady=ST.locations.length>0;
+  tc.innerHTML='<div class="card"><div class="ctitle">&#127968; Locations setup &mdash; '+esc(ST.storeName)+'</div><div style="font-size:13px;color:var(--muted);margin-bottom:1rem">'+(locsReady?'<span class="badge bok">&#10003; '+ST.locations.length+' locations active: '+ST.locations.map(function(l){return esc(l.name);}).join(", ")+'</span>':"No locations set up yet. Click below to create the 4 default locations: Shop, Baju Godown, Mahavir Chowk Godown, and Trivedi Godown. This also migrates all existing stock to Shop.")+'</div>'+(locsReady?"":'<button class="btn btnp" id="setuplocsbtn">Setup locations for '+esc(ST.storeName)+'</button>')+'<div id="locsstatus" style="margin-top:1rem"></div></div>'
+    +'<div class="card"><div class="ctitle">&#11014; One-time setup: load your inventory</div><div style="font-size:13px;color:var(--muted);margin-bottom:1rem">Loads your real ~2,786-item Electric Emporium list into Supabase. Safe to run more than once &mdash; items already in the store (matched by name) are automatically skipped, so only genuinely new items get added.</div><button class="btn btnp" id="seedbtn">Load inventory into '+esc(ST.storeName)+'</button><div id="seedstatus" style="margin-top:1rem"></div></div>'
+    +'<div class="card"><div class="ctitle">&#127991; Auto-categorize items</div><div style="font-size:13px;color:var(--muted);margin-bottom:1rem">'+uncategorized.length+' item(s) are filed under "IMPORTED" or have no category.</div>'+(uncategorized.length?'<button class="btn btnp" id="catpreviewbtn">Preview categorization</button>':"<div style='color:var(--faint);font-size:13px'>Nothing to categorize right now.</div>")+'<div id="catstatus" style="margin-top:1rem"></div></div>'
+    +'<div class="card"><div class="ctitle">&#127970; Auto-detect company / brand</div><div style="font-size:13px;color:var(--muted);margin-bottom:1rem">'+noCompany.length+' item(s) have no company set.</div>'+(noCompany.length?'<button class="btn btnp" id="comppreviewbtn">Preview company detection</button>':"<div style='color:var(--faint);font-size:13px'>Nothing to detect right now.</div>")+'<div id="compstatus" style="margin-top:1rem"></div></div>'
+    +'<div class="card"><div class="ctitle">&#11014; Re-import from TallyPrime</div><div style="font-size:13px;color:var(--muted);margin-bottom:1.5rem">Export Stock Summary from TallyPrime as <b>Excel (.xlsx)</b>, upload here.</div><div class="import-zone" id="importzone"><div style="font-size:2.5rem;margin-bottom:8px">&#128193;</div><div style="font-weight:600;color:var(--signal)">Click to select TallyPrime Excel export</div><input type="file" id="impfile" accept=".xlsx,.xls,.csv" style="display:none"></div><div id="impstatus" style="margin-top:1rem"></div></div>';
+  if(!locsReady&&G("setuplocsbtn"))G("setuplocsbtn").onclick=doSetupLocations;
   G("seedbtn").onclick=runSeed;
   if(uncategorized.length)G("catpreviewbtn").onclick=previewCategorize;
   if(noCompany.length)G("comppreviewbtn").onclick=previewCompanyDetect;
   G("importzone").onclick=function(e){if(e.target!==G("impfile"))G("impfile").click();};
   G("impfile").onchange=function(){handleImport(this);};
+}
+async function doSetupLocations(){
+  var btn=G("setuplocsbtn");if(btn)btn.disabled=true;
+  var status=G("locsstatus");
+  status.innerHTML='<div class="statusline sok"><span class="spinner"></span> Creating locations...</div>';
+  var ok=await dbSetupLocations(ST.storeId);
+  if(!ok){status.innerHTML='<div class="statusline serror">Failed to create locations.</div>';return;}
+  // Migrate all existing items to Shop (default location)
+  var locs=await fetchLocations(ST.storeId);
+  var shopLoc=locs.find(function(l){return l.is_default;})||locs[0];
+  if(shopLoc&&ST.inv.length){
+    status.innerHTML='<div class="statusline sok"><span class="spinner"></span> Migrating '+ST.inv.length+' items to Shop...</div>';
+    var CHUNK=200;
+    for(var i=0;i<ST.inv.length;i+=CHUNK){
+      var chunk=ST.inv.slice(i,i+CHUNK).map(function(item){return{item_id:item.id,location_id:shopLoc.id,qty:item.qty};});
+      await sb.from("item_locations").upsert(chunk,{onConflict:"item_id,location_id"});
+    }
+  }
+  status.innerHTML='<div class="statusline sok">&#10003; Done! Locations created and all existing stock assigned to Shop.</div>';
+  await loadStoreData(ST.storeId);
+  renderTab();
 }
 function previewCompanyDetect(){
   var noCompany=ST.inv.filter(function(i){return!i.company;});
