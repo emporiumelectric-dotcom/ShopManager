@@ -228,7 +228,7 @@ var UNIT_OPTS=["Nos","Pcs","Mtr","Feet","Box","Roll","Kg","Grams","Set"];
 
 var ST={
   user:null, users:[], stores:[], storeId:null, storeName:"",
-  tab:"dashboard", inv:[], hist:[], cart:[], locations:[], defaultLocId:null,
+  tab:"dashboard", inv:[], hist:[], cart:[], locations:[], defaultLocId:null, itemLocs:{},
   modal:null, editItem:null, invQ:"", invCat:"", invLocId:"", invPage:1, invPageSize:50,
   siRows:[{id:1,itemId:null,name:"",qty:1}], siSupplier:"", siRef:"", siDate:TODAYKEY, siLocId:null,
   trRows:[{id:1,itemId:null,name:"",qty:1}], trFromId:null, trToId:null,
@@ -259,6 +259,24 @@ async function fetchLocations(storeId){
   var {data,error}=await sb.from("locations").select("*").eq("store_id",storeId).order("is_default",{ascending:false}).order("name");
   if(error){console.error(error);return [];}
   return data||[];
+}
+async function fetchItemLocs(locIds){
+  if(!locIds||!locIds.length)return {};
+  var all=[],from=0,pageSize=2000;
+  while(true){
+    var {data,error}=await sb.from("item_locations").select("item_id,location_id,qty").in("location_id",locIds).range(from,from+pageSize-1);
+    if(error){console.error(error);break;}
+    if(!data||data.length===0)break;
+    all=all.concat(data);
+    if(data.length<pageSize)break;
+    from+=pageSize;
+  }
+  var map={};
+  all.forEach(function(r){
+    if(!map[r.item_id])map[r.item_id]={};
+    map[r.item_id][r.location_id]=Number(r.qty);
+  });
+  return map;
 }
 async function dbSetupLocations(storeId){
   var locs=[
@@ -341,6 +359,9 @@ async function loadStoreData(storeId){
   if(!ST.siLocId)ST.siLocId=ST.defaultLocId;
   if(!ST.trFromId)ST.trFromId=ST.defaultLocId;
   if(!ST.trToId&&locs.length>1)ST.trToId=locs[1].id;
+  // Load per-location stock breakdown if locations exist
+  var locIds=locs.map(function(l){return l.id;});
+  ST.itemLocs=locIds.length?await fetchItemLocs(locIds):{};
   ST.loading=false;
   render();
 }
@@ -588,11 +609,14 @@ function renderDashboard(tc){
 // ── INVENTORY ──
 function renderInv(tc){
   var isOwner=ST.user.role==="owner";
-  var canEdit=true; // all logged-in staff can manage stock (add/edit items); delete is gated separately
+  var canEdit=true;
   var focusInfo=null;
   var active=document.activeElement;
   if(active&&active.id==="invsearch")focusInfo={id:"invsearch",pos:active.selectionStart};
   var q=ST.invQ.toLowerCase(),cat=ST.invCat;
+  var hasLocs=ST.locations.length>0;
+  var filterLocId=ST.invLocId?parseInt(ST.invLocId):null;
+  var filterLoc=filterLocId?ST.locations.find(function(l){return l.id===filterLocId;}):null;
   var items=ST.inv.filter(function(i){return(!q||i.name.toLowerCase().includes(q)||(i.cat||"").toLowerCase().includes(q)||(i.company||"").toLowerCase().includes(q))&&(!cat||i.cat===cat);});
   var neg=ST.inv.filter(function(i){return i.qty<0;}).length;
   var low=ST.inv.filter(function(i){return i.min>0&&i.qty<=i.min;}).length;
@@ -603,14 +627,24 @@ function renderInv(tc){
   if(ST.invPage<1)ST.invPage=1;
   var pageStart=(ST.invPage-1)*pageSize;
   var rows=items.slice(pageStart,pageStart+pageSize).map(function(i){
-    var st=i.qty<0?"<span class='badge bdanger'>"+i.qty+"</span>":i.qty===0?"<span class='badge bwarn'>0</span>":"<b>"+i.qty+"</b>";
+    // Use location-specific qty if filter is active, else show total
+    var displayQty=filterLocId?(ST.itemLocs[i.id]?ST.itemLocs[i.id][filterLocId]||0:0):i.qty;
+    var st=displayQty<0?"<span class='badge bdanger'>"+displayQty+"</span>":displayQty===0?"<span class='badge bwarn'>0</span>":"<b>"+displayQty+"</b>";
+    // If no filter, show mini location breakdown as tooltip-style subtitle
+    var locBreakdown="";
+    if(!filterLocId&&hasLocs&&ST.itemLocs[i.id]){
+      var parts=ST.locations.map(function(l){var q2=ST.itemLocs[i.id]?ST.itemLocs[i.id][l.id]||0:0;return q2>0?esc(l.name)+": "+q2:"";}).filter(Boolean).join(" · ");
+      if(parts)locBreakdown='<div style="font-size:10px;color:var(--faint);margin-top:2px">'+parts+'</div>';
+    }
     var catCell=canEdit?"<button class='catbtn' data-id='"+i.id+"'>"+(esc(i.cat||"(none)"))+"</button>":"<span class='badge binfo' style='font-size:10px'>"+esc(i.cat||"")+"</span>";
     var compCell=canEdit?"<button class='compbtn' data-id='"+i.id+"'>"+(esc(i.company||"+ add"))+"</button>":esc(i.company||"—");
-    return "<tr><td style='font-size:12px'>"+esc(i.name)+"</td><td class='catcell' data-id='"+i.id+"'>"+catCell+"</td><td class='compcell' data-id='"+i.id+"'>"+compCell+"</td><td>"+st+"</td><td style='color:#aaa;font-size:12px'>"+esc(i.unit||"Nos")+"</td>"+(canEdit?"<td><button class='btn btnsm editbtn' data-id='"+i.id+"'>Edit</button></td>":"")+"</tr>";
+    return "<tr><td style='font-size:12px'>"+esc(i.name)+locBreakdown+"</td><td class='catcell' data-id='"+i.id+"'>"+catCell+"</td><td class='compcell' data-id='"+i.id+"'>"+compCell+"</td><td>"+st+"</td><td style='color:var(--faint);font-size:12px'>"+esc(i.unit||"Nos")+"</td>"+(canEdit?"<td><button class='btn btnsm editbtn' data-id='"+i.id+"'>Edit</button></td>":"")+"</tr>";
   }).join("");
-  if(!rows)rows="<tr><td colspan='6' style='text-align:center;color:#aaa;padding:2rem'>No items found.</td></tr>";
+  if(!rows)rows="<tr><td colspan='6' style='text-align:center;color:var(--faint);padding:2rem'>No items found.</td></tr>";
   var catopts='<option value="">All categories</option>'+cats.map(function(c){return '<option value="'+esc(c)+'"'+(ST.invCat===c?" selected":"")+">"+esc(c)+"</option>";}).join("");
-  var shownFrom=items.length?pageStart+1:0, shownTo=Math.min(pageStart+pageSize,items.length);
+  var locopts=hasLocs?'<option value="">All locations</option>'+ST.locations.map(function(l){return '<option value="'+l.id+'"'+(ST.invLocId==l.id?" selected":"")+">"+esc(l.name)+"</option>";}).join(""):"";
+  var shownFrom=items.length?pageStart+1:0,shownTo=Math.min(pageStart+pageSize,items.length);
+  var qtyHeader=filterLoc?"Qty @ "+esc(filterLoc.name):"Qty (total)";
   var alertHtml="";
   if(neg>0||low>0){
     var parts=[];
@@ -619,20 +653,18 @@ function renderInv(tc){
     alertHtml='<div class="alertbar '+(neg>0?"danger":"warn")+'">&#9888;&#65039; '+parts.join(" &middot; ")+' &mdash; review before next stock-in.</div>';
   }
   tc.innerHTML=alertHtml+'<div class="mgrid"><div class="metric"><div class="mlabel">Total Items</div><div class="mval">'+ST.inv.length.toLocaleString("en-IN")+'</div></div><div class="metric"><div class="mlabel">Negative</div><div class="mval '+(neg>0?"danger":"ok")+'">'+neg+'</div></div><div class="metric"><div class="mlabel">Low Stock</div><div class="mval '+(low>0?"warn":"ok")+'">'+low+'</div></div><div class="metric"><div class="mlabel">Shown</div><div class="mval">'+shownFrom+'&ndash;'+shownTo+' / '+items.length.toLocaleString("en-IN")+'</div></div></div>'
-    +'<div class="card"><div class="ctitle"><span>Inventory &mdash; '+esc(ST.storeName)+'</span>'+(canEdit?"<button class='btn btnp btnsm' id='additembtn'>+ Add item</button>":"")+'</div>'
-    +'<div class="srow"><input type="text" id="invsearch" placeholder="Search items..." value="'+esc(ST.invQ)+'"><select id="catsel" style="max-width:180px">'+catopts+'</select></div>'
-    +(canEdit?'<div style="font-size:11px;color:#999;margin-bottom:6px">Tip: click a category or company to rename it, or type a new one to create it.</div>':"")
-    +'<div class="twrap"><table><thead><tr><th>Item</th><th>Category</th><th>Company</th><th>Qty</th><th>Unit</th>'+(canEdit?"<th></th>":"")+'</tr></thead><tbody>'+rows+'</tbody></table></div>'
-    +'<div style="display:flex;align-items:center;justify-content:center;gap:12px;padding:14px 0"><button class="btn btnsm" id="prevpagebtn" '+(ST.invPage<=1?"disabled":"")+'>&larr; Prev</button><span style="font-size:13px;color:#666">Page '+ST.invPage+' of '+totalPages+'</span><button class="btn btnsm" id="nextpagebtn" '+(ST.invPage>=totalPages?"disabled":"")+'>Next &rarr;</button></div>'
+    +'<div class="card"><div class="ctitle"><span>Inventory &mdash; '+esc(ST.storeName)+(filterLoc?' <span style="font-size:12px;color:var(--signal);font-weight:500">@ '+esc(filterLoc.name)+'</span>':"")+'</span>'+(canEdit?"<button class='btn btnp btnsm' id='additembtn'>+ Add item</button>":"")+'</div>'
+    +'<div class="srow"><input type="text" id="invsearch" placeholder="Search items..." value="'+esc(ST.invQ)+'"><select id="catsel" style="max-width:160px">'+catopts+'</select>'+(hasLocs?'<select id="locsel" style="max-width:180px">'+locopts+'</select>':"")+'</div>'
+    +(canEdit?'<div style="font-size:11px;color:var(--faint);margin-bottom:6px">Tip: click a category or company to rename it inline.</div>':"")
+    +'<div class="twrap"><table><thead><tr><th>Item</th><th>Category</th><th>Company</th><th>'+qtyHeader+'</th><th>Unit</th>'+(canEdit?"<th></th>":"")+'</tr></thead><tbody>'+rows+'</tbody></table></div>'
+    +'<div style="display:flex;align-items:center;justify-content:center;gap:12px;padding:14px 0"><button class="btn btnsm" id="prevpagebtn" '+(ST.invPage<=1?"disabled":"")+'>&larr; Prev</button><span style="font-size:13px;color:var(--muted)">Page '+ST.invPage+' of '+totalPages+'</span><button class="btn btnsm" id="nextpagebtn" '+(ST.invPage>=totalPages?"disabled":"")+'>Next &rarr;</button></div>'
     +'</div>';
   G("invsearch").oninput=function(){ST.invQ=this.value;ST.invPage=1;renderInv(tc);};
   G("catsel").onchange=function(){ST.invCat=this.value;ST.invPage=1;renderInv(tc);};
+  if(hasLocs&&G("locsel"))G("locsel").onchange=function(){ST.invLocId=this.value;ST.invPage=1;renderInv(tc);};
   G("prevpagebtn").onclick=function(){if(ST.invPage>1){ST.invPage--;renderInv(tc);}};
   G("nextpagebtn").onclick=function(){if(ST.invPage<totalPages){ST.invPage++;renderInv(tc);}};
-  if(focusInfo){
-    var el=G(focusInfo.id);
-    if(el){el.focus();try{el.setSelectionRange(focusInfo.pos,focusInfo.pos);}catch(e){}}
-  }
+  if(focusInfo){var el=G(focusInfo.id);if(el){el.focus();try{el.setSelectionRange(focusInfo.pos,focusInfo.pos);}catch(e){}}}
   if(canEdit){
     G("additembtn").onclick=openAdd;
     tc.querySelectorAll(".editbtn").forEach(function(btn){btn.onclick=function(){openEdit(this.dataset.id);};});
