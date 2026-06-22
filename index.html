@@ -318,11 +318,14 @@ async function fetchItems(storeId){
   return all.map(rowToItem);
 }
 async function fetchHistory(storeId){
-  var {data,error}=await sb.from("transactions").select("*, transaction_items(*), from_loc:from_location_id(name), to_loc:to_location_id(name)").eq("store_id",storeId).order("created_at",{ascending:false}).limit(300);
-  if(error){console.error(error);return [];}
-  return data.map(function(t){
+  var {data,error}=await sb.from("transactions").select("*, transaction_items(*)").eq("store_id",storeId).order("created_at",{ascending:false}).limit(300);
+  if(error){console.error("fetchHistory error:",error);return [];}
+  return (data||[]).map(function(t){
+    // Resolve location names from already-loaded ST.locations (works even if columns are null/missing)
+    var fromLoc=t.from_location_id?ST.locations.find(function(l){return l.id===t.from_location_id;}):null;
+    var toLoc=t.to_location_id?ST.locations.find(function(l){return l.id===t.to_location_id;}):null;
     return {id:t.id,type:t.type,ref:t.ref||"—",supplier:t.supplier||"—",date:t.txn_date,by:t.by_user||"—",
-      fromLoc:t.from_loc?t.from_loc.name:null,toLoc:t.to_loc?t.to_loc.name:null,
+      fromLoc:fromLoc?fromLoc.name:null,toLoc:toLoc?toLoc.name:null,
       items:(t.transaction_items||[]).map(function(li){return{id:li.id,itemId:li.item_id,name:li.item_name,qty:Number(li.qty),locationId:li.location_id};})};
   });
 }
