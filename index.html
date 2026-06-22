@@ -659,9 +659,9 @@ function renderInv(tc){
     +'<div class="twrap"><table><thead><tr><th>Item</th><th>Category</th><th>Company</th><th>'+qtyHeader+'</th><th>Unit</th>'+(canEdit?"<th></th>":"")+'</tr></thead><tbody>'+rows+'</tbody></table></div>'
     +'<div style="display:flex;align-items:center;justify-content:center;gap:12px;padding:14px 0"><button class="btn btnsm" id="prevpagebtn" '+(ST.invPage<=1?"disabled":"")+'>&larr; Prev</button><span style="font-size:13px;color:var(--muted)">Page '+ST.invPage+' of '+totalPages+'</span><button class="btn btnsm" id="nextpagebtn" '+(ST.invPage>=totalPages?"disabled":"")+'>Next &rarr;</button></div>'
     +'</div>';
-  G("invsearch").oninput=function(){ST.invQ=this.value;ST.invPage=1;renderInv(tc);};
-  G("catsel").onchange=function(){ST.invCat=this.value;ST.invPage=1;renderInv(tc);};
-  if(hasLocs&&G("locsel"))G("locsel").onchange=function(){ST.invLocId=this.value;ST.invPage=1;renderInv(tc);};
+  G("invsearch").oninput=function(){ST.invQ=this.value;ST.invPage=1;var sy=window.scrollY;renderInv(tc);requestAnimationFrame(function(){window.scrollTo(0,sy);});};
+  G("catsel").onchange=function(){ST.invCat=this.value;ST.invPage=1;var sy=window.scrollY;renderInv(tc);requestAnimationFrame(function(){window.scrollTo(0,sy);});};
+  if(hasLocs&&G("locsel"))G("locsel").onchange=function(){ST.invLocId=this.value;ST.invPage=1;var sy=window.scrollY;renderInv(tc);requestAnimationFrame(function(){window.scrollTo(0,sy);});};
   G("prevpagebtn").onclick=function(){if(ST.invPage>1){ST.invPage--;renderInv(tc);}};
   G("nextpagebtn").onclick=function(){if(ST.invPage<totalPages){ST.invPage++;renderInv(tc);}};
   if(focusInfo){var el=G(focusInfo.id);if(el){el.focus();try{el.setSelectionRange(focusInfo.pos,focusInfo.pos);}catch(e){}}}
@@ -691,19 +691,21 @@ function startInlineEdit(td,id,field){
   function finish(save){
     if(done)return;done=true;
     var val=(inp.value||"").trim();
-    if(!save||val===(item[field]||"")){renderTab();return;}
-    if(isCat&&!val){alert("Category can't be empty.");renderTab();return;}
+    var sy=window.scrollY;
+    function restore(){requestAnimationFrame(function(){window.scrollTo(0,sy);});}
+    if(!save||val===(item[field]||"")){renderTab();restore();return;}
+    if(isCat&&!val){alert("Category can't be empty.");renderTab();restore();return;}
     var exists=existing.some(function(c){return c.toLowerCase()===val.toLowerCase();});
     if(val&&!exists){
       var label=isCat?"category":"company";
       if(!confirm('"'+val+'" doesn\'t exist as a '+label+' yet.\n\nCreate new '+label+' "'+val+'"?')){
-        renderTab();return;
+        renderTab();restore();return;
       }
     }
     var fields={};fields[field]=val;
     dbUpdateItem(id,fields).then(function(ok){
       if(ok)item[field]=val;
-      renderTab();
+      renderTab();restore();
     });
   }
   inp.onblur=function(){finish(true);};
