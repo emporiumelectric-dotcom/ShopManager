@@ -31,8 +31,8 @@
   --shadow-lg:0 16px 48px rgba(15,23,41,.18);
 }
 *{box-sizing:border-box;margin:0;padding:0}
-html,body{width:100%;max-width:100%;overflow-x:hidden}
-body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--porcelain);color:var(--ink-text);font-size:14.5px;-webkit-font-smoothing:antialiased;touch-action:pan-x pan-y}
+html{overflow-x:hidden;max-width:100%}
+body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--porcelain);color:var(--ink-text);font-size:14.5px;-webkit-font-smoothing:antialiased;touch-action:pan-x pan-y;max-width:100vw}
 input,select,button,textarea{font-family:inherit;font-size:14px;max-width:100%}
 :focus-visible{outline:2.5px solid var(--signal);outline-offset:1px}
 .hidden{display:none!important}
@@ -524,16 +524,44 @@ function renderNav(){
   var isOwner=ST.user&&ST.user.role==="owner";
   var cc=ST.cart.length;
   var nav=G("navarea");if(!nav)return;
-  var navDefs=[{t:"dashboard",icon:"&#127968;",label:"Home"},{t:"inventory",icon:"&#128230;",label:"Stock"},{t:"sale",icon:"&#128722;",label:"Sale",badge:cc>0?cc:0},{t:"stockin",icon:"&#128229;",label:"Stock IN"},{t:"transfer",icon:"&#8651;",label:"Transfer"},{t:"history",icon:"&#128203;",label:"History"}];
-  if(isOwner){navDefs.push({t:"import",icon:"&#11014;",label:"Import"});navDefs.push({t:"reports",icon:"&#128202;",label:"Reports"});}
+  var isMobile=window.innerWidth<=860;
+  var mainDefs=[{t:"dashboard",icon:"&#127968;",label:"Home"},{t:"inventory",icon:"&#128230;",label:"Stock"},{t:"sale",icon:"&#128722;",label:"Sale",badge:cc>0?cc:0},{t:"stockin",icon:"&#128229;",label:"Stock IN"},{t:"transfer",icon:"&#8651;",label:"Transfer"},{t:"history",icon:"&#128203;",label:"History"}];
+  var moreDefs=isOwner?[{t:"import",icon:"&#11014;",label:"Import"},{t:"reports",icon:"&#128202;",label:"Reports"}]:[];
+  var allDefs=mainDefs.concat(moreDefs);
+  // On mobile, show main 6 items + a "More" dot-menu if there are owner items
+  var showDefs=isMobile&&moreDefs.length?mainDefs:allDefs;
   nav.innerHTML="";
-  navDefs.forEach(function(def){
+  showDefs.forEach(function(def){
     var btn=document.createElement("button");
     btn.className="navbtn"+(ST.tab===def.t?" active":"");
     btn.innerHTML='<span class="nicon">'+def.icon+'</span><span class="nlabel">'+def.label+'</span>'+(def.badge?"<span class='nbadge'>"+def.badge+"</span>":"");
     btn.onclick=(function(tab){return function(){ST.tab=tab;renderNav();renderTab();};})(def.t);
     nav.appendChild(btn);
   });
+  // Add "More" button on mobile for owner-only tabs
+  if(isMobile&&moreDefs.length){
+    var moreActive=moreDefs.some(function(d){return d.t===ST.tab;});
+    var moreBtn=document.createElement("button");
+    moreBtn.className="navbtn"+(moreActive?" active":"");
+    moreBtn.innerHTML='<span class="nicon">&#8943;</span><span class="nlabel">More</span>';
+    moreBtn.onclick=function(){
+      var existing=G("morepanel");
+      if(existing){existing.remove();return;}
+      var panel=document.createElement("div");
+      panel.id="morepanel";
+      panel.style.cssText="position:fixed;bottom:70px;right:8px;background:#fff;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.18);padding:8px;z-index:200;min-width:140px;border:1px solid var(--line)";
+      moreDefs.forEach(function(def){
+        var item=document.createElement("button");
+        item.style.cssText="display:flex;align-items:center;gap:10px;width:100%;padding:11px 14px;border:none;background:none;font-size:14px;font-weight:600;color:var(--ink-text);border-radius:8px;cursor:pointer";
+        item.innerHTML=def.icon+" "+def.label;
+        item.onclick=function(){panel.remove();ST.tab=def.t;renderNav();renderTab();};
+        panel.appendChild(item);
+      });
+      document.body.appendChild(panel);
+      setTimeout(function(){document.addEventListener("click",function h(e){if(!panel.contains(e.target)&&e.target!==moreBtn){panel.remove();document.removeEventListener("click",h);}});},100);
+    };
+    nav.appendChild(moreBtn);
+  }
 }
 function renderTab(){
   var tc=G("tc");if(!tc)return;
@@ -688,24 +716,31 @@ function startInlineEdit(td,id,field){
   var inp=G(inputId);
   inp.focus();inp.select();
   var done=false;
+  function restoreCell(val){
+    // Just swap the input back to a clickable badge — no full page rebuild, no scroll jump
+    var btn=document.createElement("button");
+    btn.className=isCat?"catbtn":"compbtn";
+    btn.dataset.id=id;
+    btn.textContent=val||(isCat?"(none)":"+ add");
+    td.innerHTML="";td.appendChild(btn);
+    btn.onclick=function(){startInlineEdit(td,id,field);};
+  }
   function finish(save){
     if(done)return;done=true;
     var val=(inp.value||"").trim();
-    var sy=window.scrollY;
-    function restore(){requestAnimationFrame(function(){window.scrollTo(0,sy);});}
-    if(!save||val===(item[field]||"")){renderTab();restore();return;}
-    if(isCat&&!val){alert("Category can't be empty.");renderTab();restore();return;}
+    if(!save||val===(item[field]||"")){restoreCell(item[field]||"");return;}
+    if(isCat&&!val){alert("Category can't be empty.");restoreCell(item[field]||"");return;}
     var exists=existing.some(function(c){return c.toLowerCase()===val.toLowerCase();});
     if(val&&!exists){
       var label=isCat?"category":"company";
       if(!confirm('"'+val+'" doesn\'t exist as a '+label+' yet.\n\nCreate new '+label+' "'+val+'"?')){
-        renderTab();restore();return;
+        restoreCell(item[field]||"");return;
       }
     }
     var fields={};fields[field]=val;
     dbUpdateItem(id,fields).then(function(ok){
-      if(ok)item[field]=val;
-      renderTab();restore();
+      if(ok){item[field]=val;restoreCell(val);}
+      else{restoreCell(item[field]||"");}
     });
   }
   inp.onblur=function(){finish(true);};
