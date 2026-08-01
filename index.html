@@ -221,6 +221,30 @@ tr:hover td{background:#FAFBFD}
 var SUPABASE_URL = "https://buzidwccluskdkccidev.supabase.co";
 var SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ1emlkd2NjbHVza2RrY2NpZGV2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE4NTIzOTcsImV4cCI6MjA5NzQyODM5N30.VrcIV-EXRtFMge2p_f1dvK7l4mwPvHMGRhQfsinD354";
 var sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+var WRITE_FN_URL = SUPABASE_URL + "/functions/v1/shop-write";
+// All writes route through this Edge Function, which re-verifies the PIN
+// server-side (with rate limiting) before using its own service-role key --
+// direct client writes are blocked by RLS. See BACKLOG.md / commit history
+// for why. op: "insert"|"upsert"|"update"|"delete".
+async function callWrite(op,table,opts){
+  opts=opts||{};
+  var {data:{session}}=await sb.auth.getSession();
+  var token=session?session.access_token:SUPABASE_KEY;
+  var res;
+  try{
+    res=await fetch(WRITE_FN_URL,{
+      method:"POST",
+      headers:{"Authorization":"Bearer "+token,"apikey":SUPABASE_KEY,"Content-Type":"application/json"},
+      body:JSON.stringify(Object.assign({userId:ST.user?ST.user.id:null,pin:ST.user?ST.user.pin:null,op:op,table:table},opts))
+    });
+  }catch(e){
+    return {data:null,error:{message:"Network error: "+e.message}};
+  }
+  var body;
+  try{body=await res.json();}catch(e){body={};}
+  if(!res.ok){return {data:null,error:{message:body.error||("Request failed ("+res.status+")")}};}
+  return {data:body.data,error:null};
+}
 
 var TODAYKEY=new Date().toISOString().slice(0,10);
 var TODAY=new Date().toLocaleDateString("en-IN",{weekday:"short",day:"numeric",month:"short",year:"numeric"});
@@ -285,7 +309,7 @@ async function dbSetupLocations(storeId){
     {store_id:storeId,name:"Mahavir Chowk Godown",is_default:false},
     {store_id:storeId,name:"Trivedi Godown",is_default:false}
   ];
-  var {error}=await sb.from("locations").insert(locs);
+  var {error}=await callWrite("insert","locations",{values:locs});
   if(error){alert("Error creating locations: "+error.message);return false;}
   return true;
 }
@@ -293,7 +317,7 @@ async function dbSetupLocations(storeId){
 async function dbUpdateLocStock(itemId,locationId,delta){
   var {data}=await sb.from("item_locations").select("qty").eq("item_id",itemId).eq("location_id",locationId).single();
   var newQty=(data?Number(data.qty):0)+delta;
-  var {error}=await sb.from("item_locations").upsert({item_id:itemId,location_id:locationId,qty:newQty},{onConflict:"item_id,location_id"});
+  var {error}=await callWrite("upsert","item_locations",{values:{item_id:itemId,location_id:locationId,qty:newQty},onConflict:"item_id,location_id"});
   if(error){console.error("loc stock error:",error);}
 }
 // Get per-location qty breakdown for one item
@@ -310,10 +334,11 @@ async function dbTransferStock(fromLocId,toLocId,lines){
     await dbUpdateLocStock(l.itemId,toLocId,l.qty);
   }
   // Log as a transfer transaction (no stock total change)
-  var {data:txn,error}=await sb.from("transactions").insert({store_id:ST.storeId,type:"transfer",by_user:ST.user.name,txn_date:TODAYKEY,from_location_id:fromLocId,to_location_id:toLocId}).select().single();
-  if(error){console.error(error);return false;}
+  var {data,error}=await callWrite("insert","transactions",{values:{store_id:ST.storeId,type:"transfer",by_user:ST.user.name,txn_date:TODAYKEY,from_location_id:fromLocId,to_location_id:toLocId}});
+  if(error||!data||!data.length){console.error(error);return false;}
+  var txn=data[0];
   var payload=lines.map(function(l){return{transaction_id:txn.id,item_id:l.itemId,item_name:l.name,qty:l.qty};});
-  await sb.from("transaction_items").insert(payload);
+  await callWrite("insert","transaction_items",{values:payload});
   return true;
 }
 async function fetchUsers(){
@@ -367,9 +392,9 @@ async function loadStoreData(storeId){
 }
 
 async function dbAddItem(item){
-  var {data,error}=await sb.from("items").insert({store_id:ST.storeId,name:item.name,category:item.cat,company:item.company||"",unit:item.unit,qty:item.qty,min_stock:item.min}).select().single();
-  if(error){alert("Error adding item: "+error.message);return null;}
-  return rowToItem(data);
+  var {data,error}=await callWrite("insert","items",{values:{store_id:ST.storeId,name:item.name,category:item.cat,company:item.company||"",unit:item.unit,qty:item.qty,min_stock:item.min}});
+  if(error||!data||!data.length){alert("Error adding item: "+(error?error.message:"unknown error"));return null;}
+  return rowToItem(data[0]);
 }
 async function dbUpdateItem(id,fields){
   var payload={updated_at:new Date().toISOString()};
@@ -379,27 +404,28 @@ async function dbUpdateItem(id,fields){
   if(fields.unit!==undefined)payload.unit=fields.unit;
   if(fields.qty!==undefined)payload.qty=fields.qty;
   if(fields.min!==undefined)payload.min_stock=fields.min;
-  var {error}=await sb.from("items").update(payload).eq("id",id);
+  var {error}=await callWrite("update","items",{values:payload,match:{id:id}});
   if(error){alert("Error updating item: "+error.message);return false;}
   return true;
 }
 async function dbDeleteItem(id){
-  var {error}=await sb.from("items").delete().eq("id",id);
+  var {error}=await callWrite("delete","items",{match:{id:id}});
   if(error){alert("Error deleting item: "+error.message);return false;}
   return true;
 }
 async function dbRecordTransaction(type,meta,lines,extra){
   var payload0=Object.assign({store_id:ST.storeId,type:type,ref:meta.ref||null,supplier:meta.supplier||null,txn_date:meta.date,by_user:ST.user.name},extra||{});
-  var {data:txn,error}=await sb.from("transactions").insert(payload0).select().single();
-  if(error){alert("Error saving transaction: "+error.message);return false;}
+  var {data,error}=await callWrite("insert","transactions",{values:payload0});
+  if(error||!data||!data.length){alert("Error saving transaction: "+(error?error.message:"unknown error"));return false;}
+  var txn=data[0];
   var payload=lines.map(function(l){return{transaction_id:txn.id,item_id:l.itemId,item_name:l.name,qty:l.qty,location_id:l.locationId||null};});
-  var {error:e2}=await sb.from("transaction_items").insert(payload);
+  var {error:e2}=await callWrite("insert","transaction_items",{values:payload});
   if(e2){alert("Error saving line items: "+e2.message);return false;}
   for(var i=0;i<lines.length;i++){
     var l=lines[i],item=ST.inv.find(function(x){return x.id===l.itemId;});
     if(!item)continue;
     var newQty=type==="out"?item.qty-l.qty:item.qty+l.qty;
-    await sb.from("items").update({qty:newQty,updated_at:new Date().toISOString()}).eq("id",l.itemId);
+    await callWrite("update","items",{values:{qty:newQty,updated_at:new Date().toISOString()},match:{id:l.itemId}});
     item.qty=newQty;
     // Update per-location stock if location is set
     if(l.locationId){
@@ -416,12 +442,12 @@ async function dbDeleteTransaction(entry){
     var l=entry.items[i],item=ST.inv.find(function(x){return x.id===l.itemId;});
     if(!item)continue;
     var newQty=entry.type==="out"?item.qty+l.qty:item.qty-l.qty;
-    await sb.from("items").update({qty:newQty,updated_at:new Date().toISOString()}).eq("id",l.itemId);
+    await callWrite("update","items",{values:{qty:newQty,updated_at:new Date().toISOString()},match:{id:l.itemId}});
     item.qty=newQty;
   }
-  var {error:e1}=await sb.from("transaction_items").delete().eq("transaction_id",entry.id);
+  var {error:e1}=await callWrite("delete","transaction_items",{match:{transaction_id:entry.id}});
   if(e1){alert("Error deleting line items: "+e1.message);return false;}
-  var {error:e2}=await sb.from("transactions").delete().eq("id",entry.id);
+  var {error:e2}=await callWrite("delete","transactions",{match:{id:entry.id}});
   if(e2){alert("Error deleting transaction: "+e2.message);return false;}
   return true;
 }
@@ -436,18 +462,18 @@ async function dbEditTransactionLines(entry,editedLines){
     if(item){
       var stockDelta=entry.type==="out"?-delta:delta;
       var newQty=item.qty+stockDelta;
-      await sb.from("items").update({qty:newQty,updated_at:new Date().toISOString()}).eq("id",el.itemId);
+      await callWrite("update","items",{values:{qty:newQty,updated_at:new Date().toISOString()},match:{id:el.itemId}});
       item.qty=newQty;
     }
     if(el.newQty<=0){
-      await sb.from("transaction_items").delete().eq("id",el.lineId);
+      await callWrite("delete","transaction_items",{match:{id:el.lineId}});
     }else{
-      await sb.from("transaction_items").update({qty:el.newQty}).eq("id",el.lineId);
+      await callWrite("update","transaction_items",{values:{qty:el.newQty},match:{id:el.lineId}});
     }
   }
   var remaining=editedLines.filter(function(el){return el.newQty>0;});
   if(remaining.length===0){
-    await sb.from("transactions").delete().eq("id",entry.id);
+    await callWrite("delete","transactions",{match:{id:entry.id}});
   }
   return true;
 }
@@ -487,7 +513,7 @@ async function doLogin(){
   var {data,error}=await sb.rpc("verify_pin",{p_user_id:uid,p_pin:pin});
   if(error||!data||!data.length){G("lerr").textContent="Wrong user or PIN.";return;}
   var u=data[0];
-  ST.user={id:u.id,name:u.name,role:u.role,canDelete:u.role==="owner"||!!u.can_delete};
+  ST.user={id:u.id,name:u.name,role:u.role,canDelete:u.role==="owner"||!!u.can_delete,pin:pin};
   ST.storeId=storeId;
   var s=ST.stores.find(function(x){return x.id===storeId;});
   ST.storeName=s?s.name:"";
@@ -1265,7 +1291,7 @@ async function doSetupLocations(){
     var CHUNK=200;
     for(var i=0;i<ST.inv.length;i+=CHUNK){
       var chunk=ST.inv.slice(i,i+CHUNK).map(function(item){return{item_id:item.id,location_id:shopLoc.id,qty:item.qty};});
-      await sb.from("item_locations").upsert(chunk,{onConflict:"item_id,location_id"});
+      await callWrite("upsert","item_locations",{values:chunk,onConflict:"item_id,location_id"});
     }
   }
   status.innerHTML='<div class="statusline sok">&#10003; Done! Locations created and all existing stock assigned to Shop.</div>';
@@ -1344,7 +1370,7 @@ async function runSeed(){
   var CHUNK=300,inserted=0;
   for(var i=0;i<toInsert.length;i+=CHUNK){
     var chunk=toInsert.slice(i,i+CHUNK).map(function(r){return{store_id:ST.storeId,name:r.name,category:r.cat,unit:r.unit,qty:r.qty,min_stock:r.min,rate:r.rate||0};});
-    var res=await sb.from("items").insert(chunk);
+    var res=await callWrite("insert","items",{values:chunk});
     if(res.error){status.innerHTML='<div class="statusline serror">Error at item '+i+': '+esc(res.error.message)+'</div>';return;}
     inserted+=chunk.length;
     status.innerHTML='<div class="statusline sok"><span class="spinner"></span> Loaded '+inserted+' / '+toInsert.length+'...</div>';
@@ -1395,10 +1421,11 @@ async function parseXLSX(data,status){
       var r=parsedRows[i];
       var existing=ST.inv.find(function(it){return it.name.toLowerCase()===r.name.toLowerCase();});
       if(existing){
-        await sb.from("items").update({qty:r.qty,updated_at:new Date().toISOString()}).eq("id",existing.id);
+        await callWrite("update","items",{values:{qty:r.qty,updated_at:new Date().toISOString()},match:{id:existing.id}});
         existing.qty=r.qty;updated++;
       }else{
-        var {data:nd}=await sb.from("items").insert({store_id:ST.storeId,name:r.name,category:"IMPORTED",unit:"Nos",qty:r.qty,min_stock:0,rate:0}).select().single();
+        var {data:ndArr}=await callWrite("insert","items",{values:{store_id:ST.storeId,name:r.name,category:"IMPORTED",unit:"Nos",qty:r.qty,min_stock:0,rate:0}});
+        var nd=ndArr&&ndArr[0];
         if(nd)ST.inv.push(rowToItem(nd));
         added++;
       }
@@ -1525,6 +1552,11 @@ function closeML(){G("ml").innerHTML="";}
 // ===== INIT =====
 async function init(){
   G("app").innerHTML='<div class="loadwrap"><span class="spinner"></span> Connecting to Supabase...</div>';
+  var {error:authErr}=await sb.auth.signInAnonymously();
+  if(authErr){
+    G("app").innerHTML='<div class="loadwrap">Could not connect: '+esc(authErr.message)+'</div>';
+    return;
+  }
   ST.stores=await fetchStores();
   ST.users=await fetchUsers();
   render();
