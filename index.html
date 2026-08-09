@@ -216,13 +216,44 @@ tr:hover td{background:#FAFBFD}
 <div id="app"></div>
 <div id="ml"></div>
 <div id="toastwrap" class="toastwrap"></div>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="vendor/supabase-2.112.2.js"></script>
+<script src="config-validation.js"></script>
 <script>
 // ===== SUPABASE CONFIG =====
-var SUPABASE_URL = "https://buzidwccluskdkccidev.supabase.co";
-var SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ1emlkd2NjbHVza2RrY2NpZGV2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE4NTIzOTcsImV4cCI6MjA5NzQyODM5N30.VrcIV-EXRtFMge2p_f1dvK7l4mwPvHMGRhQfsinD354";
-var sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
-var WRITE_FN_URL = SUPABASE_URL + "/functions/v1/shop-write";
+var SUPABASE_URL;
+var SUPABASE_KEY;
+var sb;
+var WRITE_FN_URL;
+
+var STARTUP_ERROR_MESSAGES={
+  config_unavailable:"Configuration unavailable — connect to the internet once to finish setup.",
+  application_files_unavailable:"Application files unavailable — connect to the internet and reopen ShopManager.",
+  config_invalid:"Configuration invalid — contact the owner before using ShopManager."
+};
+function renderStartupError(code){
+  var message=STARTUP_ERROR_MESSAGES[code]||STARTUP_ERROR_MESSAGES.config_invalid;
+  G("app").innerHTML='<div class="loadwrap">'+esc(message)+'</div>';
+}
+async function loadConfig(){
+  var validator=window.EEConfigValidation;
+  if(!validator||typeof validator.validateConfigBody!=="function"){
+    return {error:"application_files_unavailable"};
+  }
+  var response;
+  try{
+    response=await fetch("config.json",{cache:"no-store"});
+  }catch(error){
+    return {error:"config_unavailable"};
+  }
+  if(!response||!response.ok){return {error:"config_unavailable"};}
+  var body;
+  try{body=await response.text();}catch(error){return {error:"config_unavailable"};}
+  var result=validator.validateConfigBody(body);
+  if(!result.ok){
+    return {error:result.error==="config_unavailable"?"config_unavailable":"config_invalid"};
+  }
+  return result.config;
+}
 // All writes route through this Edge Function, which re-verifies the PIN
 // server-side (with rate limiting) before using its own service-role key --
 // direct client writes are blocked by RLS. See BACKLOG.md / commit history
@@ -343,7 +374,7 @@ async function dbTransferStock(fromLocId,toLocId,lines){
   return true;
 }
 async function fetchUsers(){
-  var {data,error}=await sb.from("users_public").select("*").order("role").order("name");
+  var {data,error}=await sb.from("users_public").select("id,name,role,can_delete").order("role").order("name");
   if(error){console.error(error);return [];}
   return (data||[]).map(function(r){return {id:r.id,name:r.name,role:r.role,canDelete:r.role==="owner"||!!r.can_delete};});
 }
@@ -1553,6 +1584,21 @@ function closeML(){G("ml").innerHTML="";}
 // ===== INIT =====
 async function init(){
   G("app").innerHTML='<div class="loadwrap"><span class="spinner"></span> Connecting to Supabase...</div>';
+  var cfg=await loadConfig();
+  if(cfg.error){renderStartupError(cfg.error);return;}
+  if(!window.supabase||typeof window.supabase.createClient!=="function"){
+    renderStartupError("application_files_unavailable");
+    return;
+  }
+  SUPABASE_URL=cfg.url;
+  SUPABASE_KEY=cfg.anonKey;
+  WRITE_FN_URL=SUPABASE_URL+"/functions/v1/shop-write";
+  try{
+    sb=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY);
+  }catch(error){
+    renderStartupError("config_invalid");
+    return;
+  }
   var {error:authErr}=await sb.auth.signInAnonymously();
   if(authErr){
     G("app").innerHTML='<div class="loadwrap">Could not connect: '+esc(authErr.message)+'</div>';
