@@ -121,6 +121,7 @@ jobs:
       - name: Write deployment record
         env:
           ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+          DEPLOYED_COMMIT_SHA: ${{ github.sha }}
           PAGE_URL: ${{ steps.deployment.outputs.page_url }}
         shell: bash
         run: |
@@ -128,6 +129,7 @@ jobs:
             echo "## ShopManager Pages deployment"
             echo ""
             echo "- Run ID: \`$GITHUB_RUN_ID\`"
+            echo "- Deployed commit SHA: \`$DEPLOYED_COMMIT_SHA\`"
             echo "- Artifact ID: \`$ARTIFACT_ID\`"
             echo "- URL: $PAGE_URL"
             echo "- Artifact retention: 30 days"
