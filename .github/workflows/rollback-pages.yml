@@ -3,149 +3,171 @@ name: Roll back ShopManager Pages
 on:
   workflow_dispatch:
     inputs:
-      artifact_id:
-        description: Retained known-good Pages artifact ID
+      commit_sha:
+        description: Known-good commit SHA to restore
         required: true
         type: string
 
 permissions:
-  actions: read
-  pages: write
-  id-token: write
+  contents: read
 
 concurrency:
   group: github-pages
   cancel-in-progress: false
 
+# This rollback regenerates config.json from CURRENT repository secrets.
+# That is safe while no key rotation has occurred. During any future key
+# rotation, commit-SHA rollback is unsafe between the secret change and full
+# verification; that change must define and rehearse its own rollback plan.
+
 jobs:
-  rollback:
+  build:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
 
-    environment:
-      name: github-pages
-      url: https://manager.electricemporium.in/
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact_id }}
+      config_sha256: ${{ steps.hashes.outputs.config_sha256 }}
+      vendor_sha256: ${{ steps.hashes.outputs.vendor_sha256 }}
+      restored_commit_sha: ${{ steps.target.outputs.restored_commit_sha }}
 
     steps:
-      - name: Validate and deploy retained artifact
-        id: rollback
-        uses: actions/github-script@v7
-        env:
-          ARTIFACT_ID: ${{ inputs.artifact_id }}
+      - name: Check out rollback target
+        uses: actions/checkout@v4
         with:
-          script: |
-            const artifactId = Number(process.env.ARTIFACT_ID);
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 0
 
-            if (!Number.isSafeInteger(artifactId) || artifactId <= 0) {
-              core.setFailed("artifact_id must be a positive integer");
-              return;
-            }
-
-            const artifactResponse = await github.rest.actions.getArtifact({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              artifact_id: artifactId
-            });
-
-            const artifact = artifactResponse.data;
-
-            if (artifact.expired) {
-              core.setFailed(`Artifact ${artifactId} has expired`);
-              return;
-            }
-
-            if (artifact.name !== "github-pages") {
-              core.setFailed(
-                `Artifact ${artifactId} is named "${artifact.name}", not "github-pages"`
-              );
-              return;
-            }
-
-            const oidcToken = await core.getIDToken();
-            const buildVersion = `rollback-${context.runId}-${artifactId}`;
-
-            const deploymentResponse = await github.request(
-              "POST /repos/{owner}/{repo}/pages/deployments",
-              {
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                artifact_id: artifactId,
-                pages_build_version: buildVersion,
-                oidc_token: oidcToken
-              }
-            );
-
-            const deploymentId =
-              deploymentResponse.data.id ||
-              deploymentResponse.data.deployment_id;
-
-            if (!deploymentId) {
-              core.setFailed("GitHub did not return a Pages deployment ID");
-              return;
-            }
-
-            for (let attempt = 0; attempt < 60; attempt += 1) {
-              const statusResponse = await github.request(
-                "GET /repos/{owner}/{repo}/pages/deployments/{pages_deployment_id}",
-                {
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  pages_deployment_id: deploymentId
-                }
-              );
-
-              const status = statusResponse.data.status;
-
-              if (status === "succeed") {
-                core.setOutput("deployment_id", deploymentId);
-                core.setOutput("artifact_id", artifactId);
-                return;
-              }
-
-              if (
-                status === "failed" ||
-                status === "errored" ||
-                status === "cancelled"
-              ) {
-                core.setFailed(`Pages rollback ended with status: ${status}`);
-                return;
-              }
-
-              await new Promise(function (resolve) {
-                setTimeout(resolve, 5000);
-              });
-            }
-
-            core.setFailed("Timed out waiting for Pages rollback");
-
-      - name: Verify public site responds
+      - name: Validate rollback target
+        id: target
+        env:
+          ROLLBACK_SHA: ${{ inputs.commit_sha }}
         shell: bash
         run: |
-          curl -fsS \
-            --retry 12 \
-            --retry-delay 5 \
-            -H "Cache-Control: no-cache" \
-            "https://manager.electricemporium.in/index.html?rollback=${GITHUB_RUN_ID}" \
-            -o /dev/null
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          restored_commit_sha="$(git rev-parse --verify "${ROLLBACK_SHA}^{commit}")"
 
-          curl -fsS \
-            --retry 12 \
-            --retry-delay 5 \
-            -H "Cache-Control: no-cache" \
-            "https://manager.electricemporium.in/vendor/supabase-2.112.2.js?rollback=${GITHUB_RUN_ID}" \
-            -o /dev/null
+          if [ "$restored_commit_sha" != "$(git rev-parse HEAD)" ]; then
+            echo "Checked-out commit does not match commit_sha."
+            exit 1
+          fi
+
+          if ! git merge-base --is-ancestor "$restored_commit_sha" origin/main; then
+            echo "commit_sha is not an ancestor of main."
+            exit 1
+          fi
+
+          echo "restored_commit_sha=$restored_commit_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Build static artifact
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          mkdir -p dist/vendor
+          cp index.html manifest.json sw.js CNAME dist/
+          cp icon-192.png icon-512.png icon-512-maskable.png dist/
+          cp config-validation.js shell-files.js dist/
+          cp vendor/supabase-2.112.2.js dist/vendor/
+          node scripts/build-config.cjs dist/config.json
+          node scripts/validate-config-file.cjs dist/config.json
+          node scripts/verify-shell-files.cjs dist
+
+      - name: Record artifact hashes
+        id: hashes
+        shell: bash
+        run: |
+          echo "config_sha256=$(sha256sum dist/config.json | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "vendor_sha256=$(sha256sum dist/vendor/supabase-2.112.2.js | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Pages artifact
+        id: upload
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0
+        with:
+          path: dist
+          retention-days: 30
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      actions: read
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy rollback to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Check out validation scripts
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.restored_commit_sha }}
+
+      - name: Verify deployed files
+        env:
+          SITE_URL: ${{ steps.deployment.outputs.page_url }}
+          EXPECTED_CONFIG_SHA256: ${{ needs.build.outputs.config_sha256 }}
+          EXPECTED_VENDOR_SHA256: ${{ needs.build.outputs.vendor_sha256 }}
+        shell: bash
+        run: |
+          base="${SITE_URL%/}"
+          success=false
+
+          for attempt in {1..12}; do
+            curl -fsS \
+              -H "Cache-Control: no-cache" \
+              "$base/config.json?rollback=${GITHUB_RUN_ID}" \
+              -o "$RUNNER_TEMP/config.json"
+
+            curl -fsS \
+              -H "Cache-Control: no-cache" \
+              "$base/vendor/supabase-2.112.2.js?rollback=${GITHUB_RUN_ID}" \
+              -o "$RUNNER_TEMP/supabase-2.112.2.js"
+
+            config_hash="$(sha256sum "$RUNNER_TEMP/config.json" | cut -d' ' -f1)"
+            vendor_hash="$(sha256sum "$RUNNER_TEMP/supabase-2.112.2.js" | cut -d' ' -f1)"
+
+            if \
+              [ "$config_hash" = "$EXPECTED_CONFIG_SHA256" ] && \
+              [ "$vendor_hash" = "$EXPECTED_VENDOR_SHA256" ]
+            then
+              node scripts/validate-config-file.cjs "$RUNNER_TEMP/config.json"
+              success=true
+              break
+            fi
+
+            sleep 5
+          done
+
+          if [ "$success" != true ]; then
+            echo "Deployed files did not match the uploaded rollback artifact."
+            exit 1
+          fi
 
       - name: Write rollback record
         env:
-          ARTIFACT_ID: ${{ steps.rollback.outputs.artifact_id }}
-          DEPLOYMENT_ID: ${{ steps.rollback.outputs.deployment_id }}
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+          RESTORED_COMMIT_SHA: ${{ needs.build.outputs.restored_commit_sha }}
         shell: bash
         run: |
           {
             echo "## ShopManager Pages rollback"
             echo ""
-            echo "- Workflow run ID: \`$GITHUB_RUN_ID\`"
-            echo "- Restored artifact ID: \`$ARTIFACT_ID\`"
-            echo "- Pages deployment ID: \`$DEPLOYMENT_ID\`"
-            echo "- Installed-PWA reads/writes verification is still required."
+            echo "- Rollback run ID: \`$GITHUB_RUN_ID\`"
+            echo "- Restored commit SHA: \`$RESTORED_COMMIT_SHA\`"
+            echo "- New artifact ID: \`$ARTIFACT_ID\`"
+            echo "- URL: $PAGE_URL"
+            echo "- Artifact retention: 30 days"
           } >> "$GITHUB_STEP_SUMMARY"
