@@ -46,6 +46,11 @@ expectError(
 );
 expectError("malformed", "{", "invalid_json");
 expectError(
+  "wrong host",
+  body({ url: "https://wrong-project.supabase.co" }),
+  "wrong_host"
+);
+expectError(
   "wrong project",
   body({
     anonKey: token({

@@ -24,6 +24,14 @@ jobs:
       - name: Check out main
         uses: actions/checkout@v4
 
+      - name: Reject committed JWT API keys
+        shell: bash
+        run: |
+          if git grep -I -nE 'eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}' -- '*.html' '*.js' '*.json'; then
+            echo "Committed JWT-shaped API key found in a static source file."
+            exit 1
+          fi
+
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
