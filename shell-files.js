@@ -15,6 +15,7 @@
   function () {
     "use strict";
 
+    // Pages rollback rehearsal marker for deployment C.
     return Object.freeze([
       "./index.html",
       "./manifest.json",
