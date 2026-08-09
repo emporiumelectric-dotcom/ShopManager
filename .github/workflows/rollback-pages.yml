@@ -1,0 +1,151 @@
+name: Roll back ShopManager Pages
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_id:
+        description: Retained known-good Pages artifact ID
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: https://manager.electricemporium.in/
+
+    steps:
+      - name: Validate and deploy retained artifact
+        id: rollback
+        uses: actions/github-script@v7
+        env:
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+        with:
+          script: |
+            const artifactId = Number(process.env.ARTIFACT_ID);
+
+            if (!Number.isSafeInteger(artifactId) || artifactId <= 0) {
+              core.setFailed("artifact_id must be a positive integer");
+              return;
+            }
+
+            const artifactResponse = await github.rest.actions.getArtifact({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              artifact_id: artifactId
+            });
+
+            const artifact = artifactResponse.data;
+
+            if (artifact.expired) {
+              core.setFailed(`Artifact ${artifactId} has expired`);
+              return;
+            }
+
+            if (artifact.name !== "github-pages") {
+              core.setFailed(
+                `Artifact ${artifactId} is named "${artifact.name}", not "github-pages"`
+              );
+              return;
+            }
+
+            const oidcToken = await core.getIDToken();
+            const buildVersion = `rollback-${context.runId}-${artifactId}`;
+
+            const deploymentResponse = await github.request(
+              "POST /repos/{owner}/{repo}/pages/deployments",
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                artifact_id: artifactId,
+                pages_build_version: buildVersion,
+                oidc_token: oidcToken
+              }
+            );
+
+            const deploymentId =
+              deploymentResponse.data.id ||
+              deploymentResponse.data.deployment_id;
+
+            if (!deploymentId) {
+              core.setFailed("GitHub did not return a Pages deployment ID");
+              return;
+            }
+
+            for (let attempt = 0; attempt < 60; attempt += 1) {
+              const statusResponse = await github.request(
+                "GET /repos/{owner}/{repo}/pages/deployments/{pages_deployment_id}",
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pages_deployment_id: deploymentId
+                }
+              );
+
+              const status = statusResponse.data.status;
+
+              if (status === "succeed") {
+                core.setOutput("deployment_id", deploymentId);
+                core.setOutput("artifact_id", artifactId);
+                return;
+              }
+
+              if (
+                status === "failed" ||
+                status === "errored" ||
+                status === "cancelled"
+              ) {
+                core.setFailed(`Pages rollback ended with status: ${status}`);
+                return;
+              }
+
+              await new Promise(function (resolve) {
+                setTimeout(resolve, 5000);
+              });
+            }
+
+            core.setFailed("Timed out waiting for Pages rollback");
+
+      - name: Verify public site responds
+        shell: bash
+        run: |
+          curl -fsS \
+            --retry 12 \
+            --retry-delay 5 \
+            -H "Cache-Control: no-cache" \
+            "https://manager.electricemporium.in/index.html?rollback=${GITHUB_RUN_ID}" \
+            -o /dev/null
+
+          curl -fsS \
+            --retry 12 \
+            --retry-delay 5 \
+            -H "Cache-Control: no-cache" \
+            "https://manager.electricemporium.in/vendor/supabase-2.112.2.js?rollback=${GITHUB_RUN_ID}" \
+            -o /dev/null
+
+      - name: Write rollback record
+        env:
+          ARTIFACT_ID: ${{ steps.rollback.outputs.artifact_id }}
+          DEPLOYMENT_ID: ${{ steps.rollback.outputs.deployment_id }}
+        shell: bash
+        run: |
+          {
+            echo "## ShopManager Pages rollback"
+            echo ""
+            echo "- Workflow run ID: \`$GITHUB_RUN_ID\`"
+            echo "- Restored artifact ID: \`$ARTIFACT_ID\`"
+            echo "- Pages deployment ID: \`$DEPLOYMENT_ID\`"
+            echo "- Installed-PWA reads/writes verification is still required."
+          } >> "$GITHUB_STEP_SUMMARY"
