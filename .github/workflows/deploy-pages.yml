@@ -1,0 +1,134 @@
+name: Deploy ShopManager to Pages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact_id }}
+      config_sha256: ${{ steps.hashes.outputs.config_sha256 }}
+      vendor_sha256: ${{ steps.hashes.outputs.vendor_sha256 }}
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Build static artifact
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          mkdir -p dist/vendor
+          cp index.html manifest.json sw.js CNAME dist/
+          cp icon-192.png icon-512.png icon-512-maskable.png dist/
+          cp config-validation.js shell-files.js dist/
+          cp vendor/supabase-2.112.2.js dist/vendor/
+          node scripts/build-config.cjs dist/config.json
+          node scripts/validate-config-file.cjs dist/config.json
+          node scripts/verify-shell-files.cjs dist
+
+      - name: Record artifact hashes
+        id: hashes
+        shell: bash
+        run: |
+          echo "config_sha256=$(sha256sum dist/config.json | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "vendor_sha256=$(sha256sum dist/vendor/supabase-2.112.2.js | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Pages artifact
+        id: upload
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0
+        with:
+          path: dist
+          retention-days: 30
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      actions: read
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Check out validation scripts
+        uses: actions/checkout@v4
+
+      - name: Verify deployed files
+        env:
+          SITE_URL: ${{ steps.deployment.outputs.page_url }}
+          EXPECTED_CONFIG_SHA256: ${{ needs.build.outputs.config_sha256 }}
+          EXPECTED_VENDOR_SHA256: ${{ needs.build.outputs.vendor_sha256 }}
+        shell: bash
+        run: |
+          base="${SITE_URL%/}"
+          success=false
+
+          for attempt in {1..12}; do
+            curl -fsS \
+              -H "Cache-Control: no-cache" \
+              "$base/config.json?run=${GITHUB_RUN_ID}" \
+              -o "$RUNNER_TEMP/config.json"
+
+            curl -fsS \
+              -H "Cache-Control: no-cache" \
+              "$base/vendor/supabase-2.112.2.js?run=${GITHUB_RUN_ID}" \
+              -o "$RUNNER_TEMP/supabase-2.112.2.js"
+
+            config_hash="$(sha256sum "$RUNNER_TEMP/config.json" | cut -d' ' -f1)"
+            vendor_hash="$(sha256sum "$RUNNER_TEMP/supabase-2.112.2.js" | cut -d' ' -f1)"
+
+            if \
+              [ "$config_hash" = "$EXPECTED_CONFIG_SHA256" ] && \
+              [ "$vendor_hash" = "$EXPECTED_VENDOR_SHA256" ]
+            then
+              node scripts/validate-config-file.cjs "$RUNNER_TEMP/config.json"
+              success=true
+              break
+            fi
+
+            sleep 5
+          done
+
+          if [ "$success" != true ]; then
+            echo "Deployed files did not match the uploaded artifact."
+            exit 1
+          fi
+
+      - name: Write deployment record
+        env:
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        shell: bash
+        run: |
+          {
+            echo "## ShopManager Pages deployment"
+            echo ""
+            echo "- Run ID: \`$GITHUB_RUN_ID\`"
+            echo "- Artifact ID: \`$ARTIFACT_ID\`"
+            echo "- URL: $PAGE_URL"
+            echo "- Artifact retention: 30 days"
+          } >> "$GITHUB_STEP_SUMMARY"
