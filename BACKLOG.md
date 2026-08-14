@@ -2,12 +2,12 @@
 
 ## Open
 
-- [ ] Hash the staff PINs. `users.pin` stores plaintext and `verify_pin` compares raw.
+- [ ] Remove plaintext `users.pin`. Login-path hashing landed 2026-08-13; the column remains because `shop-write` reads it.
   - Throttling (see Resolved) slows guessing but does not protect the stored value. Any DB dump, backup leak, or future SECURITY DEFINER mistake exposes every staff PIN at once.
   - Use `pgcrypto` `crypt()` with a per-row salt; migrate by rehashing existing PINs in place, then drop the plaintext column.
-  - `verify_pin` is the only reader, so the change is contained — but staff cannot log in if the migration half-applies. Needs a rehearsed rollback.
+  - CORRECTED 2026-08-13: `verify_pin` is NOT the only reader. `shop-write` independently fetches `users.pin` with the service role key and compares in TypeScript (`timingSafeEqual`), so the column could not be dropped in the same change. See `docs/RECON_session_token_trace.md`. Hashing shipped as an additive `pin_hash` column instead: `verify_pin` compares the hash, falling back to plaintext only when `pin_hash IS NULL`. Verified live, all 7 staff, login and write paths, zero lockouts. `users_sync_pin_hash` keeps the two columns from drifting. SQL in `sql/pin-hashing/001`-`005`. Remaining, needs a closed shop: move `shop-write` onto `verify_pin`, verify every mutation path, drop `pin`, drop the trigger, remove the fallback, stop the client sending a raw PIN per write. Original note follows: the change is contained — but staff cannot log in if the migration half-applies. Needs a rehearsed rollback.
 
-- [ ] Trace the staff session token source before touching anonymous sign-in.
+- [ ] Constrain anonymous sign-in. Trace DONE 2026-08-13 (`docs/RECON_session_token_trace.md`): `signInAnonymously()` at `index.html:1602` supplies the Bearer token on writes; staff identity is a separate `verify_pin` check that never touches Supabase Auth. Confirmed a token-source replacement, not a toggle.
   - Live advisors flag `auth_allow_anonymous_sign_ins` on all six read tables. Disabling it looks like a one-setting close of the read-side gap.
   - It is not safe yet: `shop-write` runs `verify_jwt: true`, and the PWA may obtain its `authenticated` token from anonymous sign-in. Disabling could break both reads and writes for the shop floor mid-shift.
   - Read the auth call in `index.html` first. If the token is anonymous-derived, this becomes a token-source replacement, not a toggle.
