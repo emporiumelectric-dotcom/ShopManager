@@ -46,19 +46,6 @@ function pickFields(table: string, obj: Record<string, unknown>) {
   return out;
 }
 
-// Constant-time compare: always walks the full length of the longer string,
-// so response timing doesn't leak how many leading characters matched.
-function timingSafeEqual(a: string, b: string): boolean {
-  const maxLen = Math.max(a.length, b.length, 1);
-  let diff = a.length ^ b.length;
-  for (let i = 0; i < maxLen; i++) {
-    const ca = i < a.length ? a.charCodeAt(i) : 0;
-    const cb = i < b.length ? b.charCodeAt(i) : 0;
-    diff |= ca ^ cb;
-  }
-  return diff === 0;
-}
-
 const WINDOW_MS = 15 * 60 * 1000;
 const USER_FAIL_LIMIT = 5;
 const IP_FAIL_LIMIT = 20;
@@ -119,19 +106,20 @@ Deno.serve(async (req: Request) => {
     return json({ error: "Too many failed attempts from this network. Try again later." }, 429);
   }
 
-  // Fetch by id only -- the pin comparison happens here in application code
-  // with a constant-time compare, not as `pin = $2` in the SQL WHERE clause.
-  const { data: userRow, error: userErr } = await admin
-    .from("users")
-    .select("id, name, role, pin, can_delete")
-    .eq("id", userId)
-    .single();
+  // The PIN comparison happens inside Postgres: shop_write_check_pin
+  // (service-role-only, SECURITY DEFINER) bcrypt-compares against
+  // users.pin_hash and returns the caller's user row only on a match --
+  // wrong PIN, unknown user, and pin_hash IS NULL (no plaintext fallback)
+  // all return zero rows. This function never reads users.pin.
+  const { data: pinRows, error: pinErr } = await admin
+    .rpc("shop_write_check_pin", { p_user_id: userId, p_pin: pin });
 
-  const pinOk = !userErr && !!userRow && timingSafeEqual(String(userRow.pin), pin);
+  const userRow = !pinErr && Array.isArray(pinRows) && pinRows.length === 1 ? pinRows[0] : null;
+  const pinOk = !!userRow;
 
-  await admin.from("pin_attempts").insert({ user_id: userId, ip, success: !!pinOk });
+  await admin.from("pin_attempts").insert({ user_id: userId, ip, success: pinOk });
 
-  if (!pinOk) {
+  if (!userRow) {
     console.warn(`shop-write: failed PIN check for user ${userId} from ${ip}`);
     return json({ error: "Invalid user or PIN" }, 401);
   }

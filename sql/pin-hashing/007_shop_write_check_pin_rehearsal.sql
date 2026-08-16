@@ -54,8 +54,11 @@ END $$;
 -- 9002: hashed test user (the normal case shop-write will hit).
 -- 9003: pin_hash deliberately NULL to prove there is no plaintext
 -- fallback. Explicit pin_hash values on INSERT - the users_sync_pin_hash
--- trigger fires on UPDATE OF pin only, not on INSERT.
+-- trigger fires on UPDATE OF pin only, not on INSERT. OVERRIDING SYSTEM
+-- VALUE is required to supply explicit ids because users.id is GENERATED
+-- ALWAYS AS IDENTITY (learned in the 2026-08-16 rehearsal run).
 INSERT INTO public.users (id, name, role, pin, can_delete, pin_hash)
+OVERRIDING SYSTEM VALUE
 VALUES
   (9002, 'SHOP_WRITE_CHECK_PIN_TEST', 'test', '4242', false,
    extensions.crypt('4242', extensions.gen_salt('bf'))),
