@@ -5,8 +5,15 @@ project `buzidwccluskdkccidev` (electric-emporium-ops), function id
 `72ec771d-bdd7-43de-86b9-cf109bafdf50`, deployed with `verify_jwt: true`
 (deploy-time setting — must be preserved on every redeploy).
 
-Current state of this file: the **PIN-hash rewrite, deployed as version 5
-on 2026-08-16** (via the dashboard Code tab — the `supabase` CLI is not
+Current state of this file: the **v6 session-token rewrite (checklist
+1.2.4) — written, NOT yet deployed**. It adds `op:"login"` (mints a
+session token, hash-stored in `public.shop_sessions` per
+`sql/session-tokens/001`) and a token path for writes, and keeps the v5
+pin path unchanged for old cached clients. Deploy and verification:
+RUNBOOK.md §5, including the inverted rollback ordering (client first,
+function second).
+
+Deployed in production as of 2026-08-16: the **PIN-hash rewrite, version 5** (via the dashboard Code tab — the `supabase` CLI is not
 installed on the deploying machine; `verify_jwt: true` preserved). The PIN
 check goes through the service-role-only `public.shop_write_check_pin`
 helper (bcrypt compare against `users.pin_hash`, applied in

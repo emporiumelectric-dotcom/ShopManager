@@ -18,8 +18,9 @@ function json(body: unknown, status = 200) {
 }
 
 // Allow-listed tables and the columns callers may set on each. Anything not
-// listed here (users, pin_attempts) is unreachable through this function
-// regardless of what a caller sends -- this is the entire write surface.
+// listed here (users, pin_attempts, shop_sessions) is unreachable through
+// this function regardless of what a caller sends -- this is the entire
+// write surface.
 const TABLE_FIELDS: Record<string, string[]> = {
   items: ["store_id", "name", "category", "company", "unit", "qty", "min_stock", "rate", "updated_at"],
   item_locations: ["item_id", "location_id", "qty"],
@@ -50,6 +51,34 @@ const WINDOW_MS = 15 * 60 * 1000;
 const USER_FAIL_LIMIT = 5;
 const IP_FAIL_LIMIT = 20;
 
+// Session tokens (checklist 1.2.4). A login mints one; writes present it
+// instead of the raw PIN. ~14h covers a full shop day, so expiry mid-sale
+// only happens on a tab left open overnight (the client re-prompts and
+// retries; see index.html callWrite once the client side ships).
+const SESSION_TTL_MS = 14 * 60 * 60 * 1000;
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// 256-bit random token, base64url-encoded (43 chars). Deliberately NOT hex:
+// shop_sessions.token_hash carries a CHECK enforcing 64 lowercase hex chars,
+// so a bug that stored the raw token instead of its hash would violate the
+// constraint and fail loudly rather than silently keeping usable
+// credentials at rest.
+function mintToken(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function sha256Hex(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
+  return bytesToHex(new Uint8Array(digest));
+}
+
 function getClientIp(req: Request): string {
   const fwd = req.headers.get("x-forwarded-for");
   if (fwd) return fwd.split(",")[0].trim();
@@ -64,8 +93,10 @@ Deno.serve(async (req: Request) => {
   // Supabase session before this code runs. That JWT only proves "a real
   // browser completed the anonymous-auth handshake" -- unlike AdminPanel,
   // the caller's identity isn't the authorization credential here (ShopManager
-  // has no per-staff Supabase Auth accounts). The PIN check below is the
-  // actual authorization decision.
+  // has no per-staff Supabase Auth accounts). The credential check below is
+  // the actual authorization decision: a session token minted by op:"login",
+  // or (old cached clients -- the service worker can serve stale index.html
+  // for days) the raw PIN exactly as in v5.
   const authHeader = req.headers.get("Authorization") || "";
   if (!authHeader) return json({ error: "Missing Authorization bearer token" }, 401);
 
@@ -76,55 +107,159 @@ Deno.serve(async (req: Request) => {
     return json({ error: "Invalid JSON body" }, 400);
   }
 
-  const { userId, pin, op, table, values, match, onConflict } = body;
+  const { userId, pin, token, op, table, values, match, onConflict } = body;
   const ip = getClientIp(req);
 
-  if (!userId || typeof pin !== "string") return json({ error: "userId and pin are required" }, 400);
-
   const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
-  const since = new Date(Date.now() - WINDOW_MS).toISOString();
 
-  const { count: userFails } = await admin
-    .from("pin_attempts")
-    .select("*", { count: "exact", head: true })
-    .eq("user_id", userId)
-    .eq("success", false)
-    .gte("created_at", since);
-  if ((userFails || 0) >= USER_FAIL_LIMIT) {
-    console.warn(`shop-write: user ${userId} locked out (${userFails} failed attempts in the last 15m)`);
-    return json({ error: "Too many failed attempts for this user. Try again later." }, 429);
-  }
+  let userRow: any = null;
 
-  const { count: ipFails } = await admin
-    .from("pin_attempts")
-    .select("*", { count: "exact", head: true })
-    .eq("ip", ip)
-    .eq("success", false)
-    .gte("created_at", since);
-  if ((ipFails || 0) >= IP_FAIL_LIMIT) {
-    console.warn(`shop-write: ip ${ip} locked out (${ipFails} failed attempts in the last 15m)`);
-    return json({ error: "Too many failed attempts from this network. Try again later." }, 429);
-  }
+  if (typeof token === "string" && token && op !== "login") {
+    // ===== Token path (new clients). op:"login" never lands here -- a
+    // login always re-verifies the PIN below, token or not. =====
+    //
+    // Failures on this path are NEVER logged to pin_attempts: they are not
+    // PIN attempts, and per-user logging here would let anyone who knows a
+    // userId lock that user out of writes by spamming garbage tokens --
+    // exactly the mid-shift DoS this change removes. Guessing a 256-bit
+    // token is not a realistic path, so a console.warn is enough.
+    const tokenHash = await sha256Hex(token);
+    const { data: sess, error: sessErr } = await admin
+      .from("shop_sessions")
+      .select("id, user_id, expires_at")
+      .eq("token_hash", tokenHash)
+      .maybeSingle();
+    if (sessErr) {
+      console.error(`shop-write: session lookup failed: ${sessErr.message}`);
+      return json({ error: "Session lookup failed" }, 500);
+    }
+    if (!sess) {
+      console.warn(`shop-write: unknown session token from ${ip}`);
+      return json({ error: "Invalid session", code: "invalid_session" }, 401);
+    }
+    if (new Date(sess.expires_at).getTime() <= Date.now()) {
+      // Distinguishable from a bad token so the client can re-prompt for
+      // the PIN and retry instead of treating it as an attack/logout.
+      console.warn(`shop-write: expired session for user ${sess.user_id} from ${ip}`);
+      return json({ error: "Session expired", code: "session_expired" }, 401);
+    }
 
-  // The PIN comparison happens inside Postgres: shop_write_check_pin
-  // (service-role-only, SECURITY DEFINER) bcrypt-compares against
-  // users.pin_hash and returns the caller's user row only on a match --
-  // wrong PIN, unknown user, and pin_hash IS NULL (no plaintext fallback)
-  // all return zero rows. This function never reads users.pin.
-  const { data: pinRows, error: pinErr } = await admin
-    .rpc("shop_write_check_pin", { p_user_id: userId, p_pin: pin });
+    // Coarse activity trail now that pin_attempts only records logins.
+    // Best-effort: a failed touch must not block the write.
+    const { error: touchErr } = await admin
+      .from("shop_sessions")
+      .update({ last_used_at: new Date().toISOString() })
+      .eq("id", sess.id);
+    if (touchErr) console.warn(`shop-write: last_used_at touch failed: ${touchErr.message}`);
 
-  const userRow = !pinErr && Array.isArray(pinRows) && pinRows.length === 1 ? pinRows[0] : null;
-  const pinOk = !!userRow;
+    // Re-derive the user per request (never cached in the session row) so
+    // role/can_delete changes take effect immediately. Selected columns
+    // only -- this function must never read users.pin (checklist 1.2.1).
+    const { data: u, error: userErr } = await admin
+      .from("users")
+      .select("id, name, role, can_delete")
+      .eq("id", sess.user_id)
+      .maybeSingle();
+    if (userErr) {
+      console.error(`shop-write: session user lookup failed: ${userErr.message}`);
+      return json({ error: "Session lookup failed" }, 500);
+    }
+    if (!u) {
+      // User row gone mid-session (the FK cascade removes sessions when a
+      // user is deleted, but a race is possible). Treat as invalid.
+      console.warn(`shop-write: session for missing user ${sess.user_id} from ${ip}`);
+      return json({ error: "Invalid session", code: "invalid_session" }, 401);
+    }
+    userRow = u;
+  } else {
+    // ===== PIN path: v5 behavior, unchanged (old cached clients, and
+    // op:"login"). Only mechanical deltas from v5: `admin` is created
+    // above the branch, and `const userRow` became an assignment to the
+    // shared variable. Throttles, pin_attempts logging, error shapes and
+    // status codes are byte-for-byte. =====
+    if (!userId || typeof pin !== "string") return json({ error: "userId and pin are required" }, 400);
 
-  await admin.from("pin_attempts").insert({ user_id: userId, ip, success: pinOk });
+    const since = new Date(Date.now() - WINDOW_MS).toISOString();
 
-  if (!userRow) {
-    console.warn(`shop-write: failed PIN check for user ${userId} from ${ip}`);
-    return json({ error: "Invalid user or PIN" }, 401);
+    const { count: userFails } = await admin
+      .from("pin_attempts")
+      .select("*", { count: "exact", head: true })
+      .eq("user_id", userId)
+      .eq("success", false)
+      .gte("created_at", since);
+    if ((userFails || 0) >= USER_FAIL_LIMIT) {
+      console.warn(`shop-write: user ${userId} locked out (${userFails} failed attempts in the last 15m)`);
+      return json({ error: "Too many failed attempts for this user. Try again later." }, 429);
+    }
+
+    const { count: ipFails } = await admin
+      .from("pin_attempts")
+      .select("*", { count: "exact", head: true })
+      .eq("ip", ip)
+      .eq("success", false)
+      .gte("created_at", since);
+    if ((ipFails || 0) >= IP_FAIL_LIMIT) {
+      console.warn(`shop-write: ip ${ip} locked out (${ipFails} failed attempts in the last 15m)`);
+      return json({ error: "Too many failed attempts from this network. Try again later." }, 429);
+    }
+
+    // The PIN comparison happens inside Postgres: shop_write_check_pin
+    // (service-role-only, SECURITY DEFINER) bcrypt-compares against
+    // users.pin_hash and returns the caller's user row only on a match --
+    // wrong PIN, unknown user, and pin_hash IS NULL (no plaintext fallback)
+    // all return zero rows. This function never reads users.pin.
+    const { data: pinRows, error: pinErr } = await admin
+      .rpc("shop_write_check_pin", { p_user_id: userId, p_pin: pin });
+
+    userRow = !pinErr && Array.isArray(pinRows) && pinRows.length === 1 ? pinRows[0] : null;
+    const pinOk = !!userRow;
+
+    await admin.from("pin_attempts").insert({ user_id: userId, ip, success: pinOk });
+
+    if (!userRow) {
+      console.warn(`shop-write: failed PIN check for user ${userId} from ${ip}`);
+      return json({ error: "Invalid user or PIN" }, 401);
+    }
   }
 
   const canDelete = userRow.role === "owner" || !!userRow.can_delete;
+
+  if (op === "login") {
+    // ===== Mint a session (new clients call this once per login instead
+    // of re-sending the PIN on every write). Reaching here means the PIN
+    // path above already passed: throttles enforced, PIN verified via
+    // shop_write_check_pin, pin_attempts success row written -- exactly as
+    // for a v5 write. =====
+
+    // Lazy cleanup of this user's expired sessions -- the deliberate
+    // no-cron design (001_shop_sessions.sql). Best-effort: a failed
+    // cleanup must not block the login.
+    const { error: cleanupErr } = await admin
+      .from("shop_sessions")
+      .delete()
+      .eq("user_id", userRow.id)
+      .lte("expires_at", new Date().toISOString());
+    if (cleanupErr) console.warn(`shop-write: expired-session cleanup failed for user ${userRow.id}: ${cleanupErr.message}`);
+
+    const newToken = mintToken();
+    const tokenHash = await sha256Hex(newToken);
+    const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
+
+    // Only the hash is stored (shop_sessions.token_hash, CHECK-constrained
+    // to sha256 hex). The raw token exists only in this response and in
+    // the staff device's page memory. Multiple concurrent sessions per
+    // user are allowed by design (two devices).
+    const { error: insertErr } = await admin
+      .from("shop_sessions")
+      .insert({ user_id: userRow.id, token_hash: tokenHash, expires_at: expiresAt });
+    if (insertErr) {
+      console.error(`shop-write: session insert failed for user ${userRow.id}: ${insertErr.message}`);
+      return json({ error: "Could not create session" }, 500);
+    }
+
+    console.log(`shop-write: session minted for user ${userRow.id} from ${ip}, expires ${expiresAt}`);
+    return json({ token: newToken, expiresAt, user: userRow });
+  }
 
   if (!op || !table) return json({ error: "op and table are required" }, 400);
   if (!TABLE_FIELDS[table]) return json({ error: "Table not permitted: " + table }, 403);

@@ -5,6 +5,10 @@ Scope: deploying the rewritten `index.ts` (PIN check via
 `buzidwccluskdkccidev`, verifying it with a **disposable test user**, and
 rolling back to the archived v4 if needed.
 
+> Sections 0–4 are the v5 (PIN-hash) record and reference. **Section 5**
+> covers the v6 session-token deploy (checklist 1.2.4) — written, NOT yet
+> deployed.
+
 Never use a real staff PIN for any step in this runbook. All verification
 uses throwaway user id **9004**, which this runbook creates and deletes.
 
@@ -204,3 +208,115 @@ supabase functions deploy shop-write --project-ref buzidwccluskdkccidev
   writes work again, then clean up per 3.6.
 - The `shop_write_check_pin` helper can stay in place during rollback — v4
   never calls it and it grants nothing to client roles.
+
+---
+
+## 5. v6 — session-token writes (checklist 1.2.4). Written, NOT deployed
+
+v6 adds `op:"login"` (mints a session token after exactly the v5 PIN
+check + throttle + `pin_attempts` logging; token stored only as a
+SHA-256 hash in `public.shop_sessions`, ~14h expiry, lazy expired-row
+cleanup) and a token path for writes (hash the presented token, look up
+a live session, touch `last_used_at`, derive `can_delete` from the
+session's user). The PIN path is **unchanged from v5 by design**: the
+service worker can serve stale `index.html` for days, so old cached
+clients keep writing with `{userId, pin}` throughout the rollout.
+
+Token failures are deliberately **never** logged to `pin_attempts` —
+they are not PIN attempts, and per-user logging there would let anyone
+who knows a userId lock that user out of writes by spamming garbage
+tokens. Expired sessions return a distinguishable
+`{"code":"session_expired"}` so the client can re-prompt and retry
+instead of treating it as a bad token.
+
+### 5.1 Preconditions
+
+1. `sql/session-tokens/001_shop_sessions.sql` applied to production and
+   the `002` rehearsal passed clean (both done 2026-08-16: format CHECK
+   rejects raw tokens, expiry predicate works, anon/authenticated denied
+   on table and sequence, RLS enabled, FK cascade removes sessions on
+   user delete, no rows left behind).
+2. v5 verified in production (section 0) — v6 is additive on top of it.
+3. Grant sanity: `service_role` holds ALL on `public.shop_sessions`
+   (asserted by rehearsal 002's check 7).
+
+### 5.2 Deploy
+
+Dashboard Code tab, as for v5 (no CLI on this machine): paste `index.ts`
+into Dashboard → Edge Functions → shop-write → Code and deploy.
+`verify_jwt: true` is a deploy-time setting and **must be preserved**.
+
+Post-deploy checks (function id `72ec771d-bdd7-43de-86b9-cf109bafdf50`):
+
+- version bumped (5 → 6), `verify_jwt` still `true`,
+- the bundle contains `shop_sessions`, `session_expired`, `op === "login"`
+  markers, and still contains `shop_write_check_pin`,
+- **the v5 "no `from("users")`" check is obsolete in v6.** The token path
+  legitimately reads `users` — the invariant is now narrower: the ONLY
+  `from("users")` in the bundle selects `id, name, role, can_delete`, and
+  the bundle contains no read of the `pin` column.
+
+### 5.3 Verify with a disposable test user (id 9006)
+
+Create the test user as in 3.1 but with **id 9006** (9004 was the v5
+run, 9005 the 002 rehearsal) and name `RUNBOOK_V6_TEST`. Caller token as
+in 3.2, `call()` helper as in 3.3.
+
+Run **in this order** (the per-user lockout budget is spent
+deliberately; steps 7–8 depend on it):
+
+| # | Call | Expect |
+|---|------|--------|
+| 1 | **OLD-CLIENT PROOF** — v5-shape write, correct PIN:<br>`{"userId":9006,"pin":"4242","op":"update","table":"items","match":{"id":-1},"values":{"name":"x"}}` | `200`, `{"data":[]}` — the pin path still works; a `pin_attempts` success row with caller IP |
+| 2 | **OLD-CLIENT PROOF** — same body with `"pin":"0000"` | `401`, `{"error":"Invalid user or PIN"}` (failure #1) |
+| 3 | login: `{"op":"login","userId":9006,"pin":"4242"}` | `200`, `{token, expiresAt, user}` with `expiresAt` ~14h out and `user.id = 9006`; a `pin_attempts` success row; exactly one `shop_sessions` row whose `token_hash` equals `encode(extensions.digest('<token>','sha256'),'hex')` and is **not** the token itself |
+| 4 | token write: `{"token":"<token from #3>","op":"update","table":"items","match":{"id":-1},"values":{"name":"x"}}` | `200`, `{"data":[]}`; `last_used_at` bumped; **no new `pin_attempts` row** |
+| 5 | garbage token: same body with `"token":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"` | `401`, `{"error":"Invalid session","code":"invalid_session"}`; **no `pin_attempts` row** (the lockout-DoS guard — this is the check that matters most) |
+| 6 | expiry: `UPDATE public.shop_sessions SET expires_at = now() - interval '1 second' WHERE user_id = 9006;` then repeat #4 | `401`, `{"error":"Session expired","code":"session_expired"}` — distinguishable from #5. Then log in again (#3 shape) for a fresh token; keep it for #8 |
+| 7 | lockout independence, part 1: four more wrong-PIN calls (#2 shape; failures #2–5), then `{"op":"login","userId":9006,"pin":"4242"}` with the **correct** PIN | wrong-PIN calls `401` each; the login `429` — the user lockout blocks new logins as before |
+| 8 | lockout independence, part 2: repeat #4 with the live token from #6's re-login | `200` — an **established session is immune to the PIN lockout**; staff can no longer be knocked out mid-shift |
+
+`pin_attempts` check (3.4 query, `user_id = 9006`): successes from
+#1/#3/#6-relogin, five failures from #2/#7, and **nothing at all** from
+#4/#5/#6's token calls — token traffic must be invisible to
+`pin_attempts`.
+
+Function logs (3.5): the v5 warn shapes for #2/#7, plus
+`unknown session token` for #5, `expired session` for #6,
+`session minted` for #3/#6-relogin. No 500s, no
+`permission denied for table shop_sessions` (would mean the 001 grants
+regressed).
+
+Cleanup (scoped to the test id only):
+
+```sql
+DELETE FROM public.pin_attempts WHERE user_id = 9006;
+DELETE FROM public.users WHERE id = 9006;  -- FK cascade removes its shop_sessions rows
+-- verify: all three return 0
+SELECT count(*) FROM public.pin_attempts WHERE user_id = 9006;
+SELECT count(*) FROM public.users WHERE id = 9006;
+SELECT count(*) FROM public.shop_sessions WHERE user_id = 9006;
+```
+
+Real-world smoke test as in 3.7 — one normal write through the app UI by
+a staff member. Note that until the new client ships, this exercises the
+**pin path** (that is the point: old clients must keep working).
+
+### 5.4 Rollback ordering — CLIENT FIRST, FUNCTION SECOND
+
+The dual-path design **inverts the usual rollback order**:
+
+- v6 serves both client generations. If the new (token) client
+  misbehaves after the Pages deploy, roll back the **Pages deploy**
+  (old `index.html`) and leave v6 running — old clients use the pin
+  path v6 preserves unchanged.
+- Rolling the **function** back to v5 while token-sending clients exist
+  strands them: v5 answers token bodies with
+  `400 "userId and pin are required"`. Only redeploy v5 after the Pages
+  rollback is confirmed on the actual installed shop PWAs —
+  service-worker propagation included, not just a fresh browser tab.
+- The v4 archive rules in section 4 are unchanged (v4 still requires
+  `users.pin` to exist, which is why the column drop stays last).
+- `shop_sessions` can stay in place under any rollback — v4/v5 never
+  touch it. Stale session rows expire on their own and are swept by the
+  next v6 login.
