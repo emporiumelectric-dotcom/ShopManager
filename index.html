@@ -298,12 +298,14 @@ async function postWrite(payload){
   return {status:res.status,ok:res.ok,body:body};
 }
 // Mints a session via op:"login" -- the only request that carries the PIN,
-// which is never kept afterwards, not even in memory.
+// which is never kept afterwards, not even in memory. This is the single
+// PIN check: shop-write bcrypt-compares, enforces both throttles, logs the
+// one pin_attempts row (with caller ip), and returns the user row.
 async function mintSession(userId,pin){
   var r=await postWrite({op:"login",userId:userId,pin:pin});
   if(r.netError){return {error:r.netError};}
   if(!r.ok||!r.body.token){return {error:r.body.error||("Login failed ("+r.status+")")};}
-  return {token:r.body.token,expiresAt:r.body.expiresAt};
+  return {token:r.body.token,expiresAt:r.body.expiresAt,user:r.body.user};
 }
 var REAUTH=null; // in-flight re-auth prompt; concurrent expired writes share it
 function reauthPrompt(){
@@ -320,12 +322,18 @@ function reauthPrompt(){
     document.body.appendChild(wrap);
     function done(ok){wrap.remove();REAUTH=null;resolve(ok);}
     async function submit(){
+      // Guard on the button's disabled state: Enter in the PIN field calls
+      // submit() directly, so without this a held/repeated Enter would mint
+      // one session per keypress while the first await is in flight.
+      if(G("raok").disabled)return;
       var pin=(G("rapin").value||"").trim();
       if(!pin){G("raerr").textContent="Enter your PIN.";return;}
-      G("raok").disabled=true;
+      G("raok").disabled=true;G("raok").innerHTML="Checking&hellip;";
       var sess=await mintSession(ST.user.id,pin);
-      G("raok").disabled=false;
-      if(sess.error){G("raerr").textContent=sess.error;G("rapin").value="";G("rapin").focus();return;}
+      if(sess.error){
+        G("raok").disabled=false;G("raok").innerHTML="Continue &rarr;";
+        G("raerr").textContent=sess.error;G("rapin").value="";G("rapin").focus();return;
+      }
       ST.user.token=sess.token;ST.user.tokenExp=sess.expiresAt;
       done(true);
     }
@@ -597,17 +605,28 @@ function renderLogin(){
   G("lp").onkeydown=function(e){if(e.key==="Enter")doLogin();};
 }
 async function doLogin(){
+  var btn=G("loginbtn");
+  // In-flight guard: the click handler and the PIN field's Enter handler
+  // both land here, and a slow login invites repeated taps -- each of which
+  // used to run the whole flow again and mint another session.
+  if(btn.disabled)return;
   var uid=G("lu").value,pin=(G("lp").value||"").trim(),storeId=G("ls").value;
   if(!uid){G("lerr").textContent="Please select a user.";return;}
   if(!storeId){G("lerr").textContent="Please select a store.";return;}
   if(!pin){G("lerr").textContent="Enter your PIN.";return;}
-  var {data,error}=await sb.rpc("verify_pin",{p_user_id:uid,p_pin:pin});
-  if(error||!data||!data.length){G("lerr").textContent="Wrong user or PIN.";return;}
-  var u=data[0];
-  // v6: swap the PIN for a session token (op:"login"). Without a token every
-  // write would fail, so a failed mint keeps us on the login screen.
+  G("lerr").textContent="";
+  btn.disabled=true;btn.innerHTML="Logging in&hellip;";
+  // mintSession (op:"login") is the single PIN check -- shop-write verifies
+  // the hash, enforces the throttles, and logs the one pin_attempts row.
+  // The old verify_pin RPC call here double-logged every login with a
+  // second, ip-less success row; old cached clients still call it, so the
+  // function stays in the database.
   var sess=await mintSession(uid,pin);
-  if(sess.error){G("lerr").textContent=sess.error;return;}
+  if(sess.error||!sess.user){
+    btn.disabled=false;btn.innerHTML="Login &rarr;";
+    G("lerr").textContent=sess.error||"Wrong user or PIN.";return;
+  }
+  var u=sess.user;
   ST.user={id:u.id,name:u.name,role:u.role,canDelete:u.role==="owner"||!!u.can_delete,token:sess.token,tokenExp:sess.expiresAt};
   ST.storeId=storeId;
   var s=ST.stores.find(function(x){return x.id===storeId;});
