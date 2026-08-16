@@ -5,7 +5,21 @@
 -- distinct from 003's id 9001. NOT applied automatically; run by hand via
 -- psql (like 003, the auto-rollback safety net depends on BEGIN/COMMIT
 -- being honored as one transaction, so avoid clients that autocommit per
--- statement). Exercises:
+-- statement).
+--
+-- RUN 2026-08-16 against production (buzidwccluskdkccidev), all seven
+-- checks below passed. Two lessons from that run:
+--   - OVERRIDING SYSTEM VALUE had to be added to the test-user INSERT
+--     (users.id is GENERATED ALWAYS AS IDENTITY); now in the file.
+--   - The cleanup guarantees do NOT hold when the script is run in
+--     pieces: the Supabase dashboard SQL editor does not preserve the
+--     enclosing BEGIN/COMMIT across separate runs, so each piece
+--     commits on its own. In the 2026-08-16 run the test rows 9002 and
+--     9003 survived and had to be deleted by hand afterwards. Run the
+--     whole file as one submission (or via psql) or accept manual,
+--     id-scoped cleanup.
+--
+-- Exercises:
 --   1. correct PIN                 -> exactly the test user's row back
 --   2. wrong PIN                   -> no rows
 --   3. unknown user id             -> no rows

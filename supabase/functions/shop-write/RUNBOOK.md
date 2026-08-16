@@ -10,6 +10,39 @@ uses throwaway user id **9004**, which this runbook creates and deletes.
 
 ---
 
+## 0. Execution record — this runbook was run 2026-08-16
+
+The cutover is **done** (checklist 1.2.1). Deviations from the written
+procedure, kept here because the sections below stay as the reusable
+reference (e.g. for the rollback path):
+
+- **Deploy went through the dashboard Code tab, not the CLI** — the
+  `supabase` CLI is not installed on this machine. Section 2's CLI
+  command is still the canonical procedure where the CLI exists;
+  otherwise paste `index.ts` into Dashboard → Edge Functions →
+  shop-write → Code and deploy from there, then do the same
+  post-deploy checks (version bump, `verify_jwt` still `true`, bundle
+  contains `shop_write_check_pin`, no `from("users")` /
+  `timingSafeEqual`).
+- 006 was likewise applied via the dashboard SQL editor (the Supabase
+  MCP tools were blocked by the permission layer).
+- The 007 rehearsal passed clean, but it was run in pieces and the
+  dashboard SQL editor does not preserve the enclosing `BEGIN`/`COMMIT`
+  across separate runs — the transactional cleanup did not hold, and
+  test rows 9002/9003 had to be deleted by hand. Any script here that
+  relies on running as one transaction (007, and the cleanup semantics
+  in section 3) must be submitted as a single run or via psql.
+- Verification passed: preconditions held (all seven users hashed),
+  test user 9004 exercised and removed, Owner login worked, a real item
+  edit logged a `pin_attempts` success with the caller IP, a wrong PIN
+  was rejected, no stray failures.
+- **Not done, deliberately: dropping plaintext `users.pin` (1.2.5).**
+  It waits until several days of normal shop use by Akshay and Lokesh
+  on the new path. Dropping the column invalidates the archived v4
+  rollback below, so it goes last.
+
+---
+
 ## 1. Preconditions (all must hold before deploying)
 
 1. `sql/pin-hashing/006_shop_write_check_pin.sql` applied to production
@@ -35,6 +68,10 @@ uses throwaway user id **9004**, which this runbook creates and deletes.
 `verify_jwt: true` is a **deploy-time setting and must be preserved** — it is
 what forces callers through the Supabase session handshake before the
 function runs.
+
+> 2026-08-16: the actual deploy used the dashboard Code tab, not the CLI
+> (not installed on this machine) — see section 0. The CLI steps below
+> remain the reference for machines that have it.
 
 From the repo root:
 

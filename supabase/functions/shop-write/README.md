@@ -5,13 +5,21 @@ project `buzidwccluskdkccidev` (electric-emporium-ops), function id
 `72ec771d-bdd7-43de-86b9-cf109bafdf50`, deployed with `verify_jwt: true`
 (deploy-time setting — must be preserved on every redeploy).
 
-Current state of this file: the **PIN-hash rewrite (v5 candidate, not yet
-deployed)**. The PIN check now goes through the service-role-only
-`public.shop_write_check_pin` helper (bcrypt compare against
-`users.pin_hash`, applied in `sql/pin-hashing/006`); the function no longer
-reads plaintext `users.pin`. Everything else — both throttle pre-checks, the
-`pin_attempts` logging with caller IP, response shapes, delete/edit gating —
-is unchanged from v4.
+Current state of this file: the **PIN-hash rewrite, deployed as version 5
+on 2026-08-16** (via the dashboard Code tab — the `supabase` CLI is not
+installed on the deploying machine; `verify_jwt: true` preserved). The PIN
+check goes through the service-role-only `public.shop_write_check_pin`
+helper (bcrypt compare against `users.pin_hash`, applied in
+`sql/pin-hashing/006`); the function no longer reads plaintext `users.pin`.
+Everything else — both throttle pre-checks, the `pin_attempts` logging with
+caller IP, response shapes, delete/edit gating — is unchanged from v4.
+Verified in production per the RUNBOOK (test user 9004, plus a real Owner
+login and item edit logging a success attempt with caller IP).
+
+The plaintext `users.pin` column is **deliberately still present**
+(checklist 1.2.5 pending): it stays until the new path has several days of
+normal shop use behind it, because dropping it invalidates the v4 rollback
+below.
 
 Deployment, verification, and rollback: see [RUNBOOK.md](RUNBOOK.md).
 

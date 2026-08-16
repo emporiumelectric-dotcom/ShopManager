@@ -1,5 +1,36 @@
 # PIN hashing package - notes, risks, open questions
 
+## Execution record — shop-write cutover (checklist 1.2.1), done 2026-08-16
+
+- `006_shop_write_check_pin.sql` applied to production
+  (`buzidwccluskdkccidev`) via the **Supabase dashboard SQL editor**, by
+  hand — the Supabase MCP tools were blocked by the permission layer.
+- `007` rehearsal run against production; all checks passed (correct PIN
+  returns the row; wrong PIN and unknown user return nothing; a NULL
+  `pin_hash` never falls back to plaintext; no `pin_attempts` side
+  effects; anon/authenticated denied EXECUTE; service_role allowed).
+  - The test-user INSERT needed `OVERRIDING SYSTEM VALUE` (`users.id` is
+    GENERATED ALWAYS AS IDENTITY); the file has been updated.
+  - **Cleanup caveat:** the script's transactional cleanup only holds
+    when the file runs as one transaction. The dashboard SQL editor does
+    not preserve the enclosing `BEGIN`/`COMMIT` across separate runs, so
+    running it in pieces autocommits each piece — test rows 9002 and
+    9003 survived the run and were deleted by hand.
+- Deploy precondition verified: all seven real users have a `pin_hash`,
+  none NULL.
+- Rewritten `shop-write` deployed via the **dashboard Code tab**, not the
+  CLI (the `supabase` CLI is not installed on this machine; the RUNBOOK
+  now reflects this).
+- Verified in production: Owner login works; an item edit saved and
+  logged a `pin_attempts` success **with the caller IP** (confirming the
+  new path ran); a deliberately wrong PIN was rejected; no failed
+  attempts appeared afterwards. Test user 9004 created and removed.
+
+**Deliberately NOT done: 1.2.5 — dropping the plaintext `pin` column.**
+It must wait until the new path has run through several days of normal
+shop use by Akshay and Lokesh. Dropping the column invalidates the
+archived v4 rollback (v4 reads `users.pin` directly), so it goes last.
+
 Scope reminder: this package only moves `verify_pin`'s comparison from
 plaintext to hash. `users.pin` and the `shop-write` Edge Function comparison
 site are deliberately untouched. Nothing in this package has been executed
