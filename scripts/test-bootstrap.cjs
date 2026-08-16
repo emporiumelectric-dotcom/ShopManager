@@ -1,20 +1,13 @@
 "use strict";
 
 const assert = require("assert");
-const childProcess = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
 const validation = require("../config-validation.js");
 
 const ROOT = path.resolve(__dirname, "..");
-const PRE_PHASE_B_COMMIT = "719e9c594527d8ea1ad4b35ed7051a62b1926420";
 const html = fs.readFileSync(path.join(ROOT, "index.html"), "utf8");
-const previousHtml = childProcess.execFileSync(
-  "git",
-  ["show", PRE_PHASE_B_COMMIT + ":index.html"],
-  { cwd: ROOT, encoding: "utf8" }
-);
 
 function normalize(value) {
   return value.replace(/\r\n/g, "\n");
@@ -27,17 +20,17 @@ function sliceBetween(source, startMarker, endMarker) {
   return source.slice(start, end);
 }
 
-const oldCallWrite = sliceBetween(
-  normalize(previousHtml),
-  "async function callWrite",
-  "\n\nvar TODAYKEY"
-);
-const newCallWrite = sliceBetween(
+// The write layer is pinned by BEHAVIOR and WIRE SHAPE (v6 session tokens),
+// never by byte equality against an old commit -- an intentional edit should
+// update assertions, not invalidate the suite. Deep behavior coverage
+// (retry rules, re-auth, login) lives in test-write-layer.cjs and
+// test-login.cjs; the checks here are the bootstrap-level smoke pass over
+// the same slice.
+const writeLayerSource = sliceBetween(
   normalize(html),
   "async function callWrite",
   "\n\nvar TODAYKEY"
 );
-assert.strictEqual(newCallWrite, oldCallWrite, "callWrite changed");
 
 assert(!html.includes("cdn.jsdelivr.net"), "jsDelivr remains in the boot path");
 assert(
@@ -227,22 +220,25 @@ async function run() {
     "https://buzidwccluskdkccidev.supabase.co/functions/v1/shop-write"
   );
 
+  // v6 write wire shape: a write carries the session token minted at login,
+  // and NEVER the PIN.
   let capturedWrite;
   const writeContext = vm.createContext({
     SUPABASE_KEY: "test-anon-key",
     WRITE_FN_URL:
       "https://buzidwccluskdkccidev.supabase.co/functions/v1/shop-write",
-    ST: { user: { id: 7, pin: "4321" } },
+    ST: { user: { id: 7, token: "session-token-v6", tokenExp: "2026-08-17T08:00:00.000Z" } },
     sb: {
       auth: {
         async getSession() {
-          return { data: { session: { access_token: "session-token" } } };
+          return { data: { session: { access_token: "sb-access-token" } } };
         }
       }
     },
     async fetch(url, options) {
       capturedWrite = { options, url };
       return {
+        status: 200,
         ok: true,
         async json() {
           return { data: [{ id: 99 }] };
@@ -250,7 +246,7 @@ async function run() {
       };
     }
   });
-  vm.runInContext(newCallWrite, writeContext, { filename: "call-write.js" });
+  vm.runInContext(writeLayerSource, writeContext, { filename: "write-layer.js" });
   const writeResult = await vm.runInContext(
     'callWrite("insert","items",{values:{name:"ZZTEST"}})',
     writeContext
@@ -260,19 +256,61 @@ async function run() {
   assert.strictEqual(capturedWrite.options.method, "POST");
   assert.strictEqual(
     capturedWrite.options.headers.Authorization,
-    "Bearer session-token"
+    "Bearer sb-access-token"
   );
   assert.strictEqual(capturedWrite.options.headers.apikey, "test-anon-key");
   assert.deepStrictEqual(writeBody, {
     userId: 7,
-    pin: "4321",
+    token: "session-token-v6",
     op: "insert",
     table: "items",
     values: { name: "ZZTEST" }
   });
+  assert(!("pin" in writeBody), "a v6 write must never carry a PIN");
   assert.strictEqual(writeResult.data[0].id, 99);
 
-  console.log("browser bootstrap and write-path invariance tests passed");
+  // v6 login wire shape: op:"login" is the only request that carries the
+  // PIN, and the response is {token, expiresAt, user}.
+  let capturedLogin;
+  const loginContext = vm.createContext({
+    SUPABASE_KEY: "test-anon-key",
+    WRITE_FN_URL:
+      "https://buzidwccluskdkccidev.supabase.co/functions/v1/shop-write",
+    ST: { user: null },
+    sb: {
+      auth: {
+        async getSession() {
+          return { data: { session: { access_token: "sb-access-token" } } };
+        }
+      }
+    },
+    async fetch(url, options) {
+      capturedLogin = { options, url };
+      return {
+        status: 200,
+        ok: true,
+        async json() {
+          return {
+            token: "minted-token",
+            expiresAt: "2026-08-17T08:00:00.000Z",
+            user: { id: 7, name: "Akshay", role: "staff", can_delete: false }
+          };
+        }
+      };
+    }
+  });
+  vm.runInContext(writeLayerSource, loginContext, { filename: "write-layer.js" });
+  const sess = await vm.runInContext('mintSession(7,"4321")', loginContext);
+  assert.deepStrictEqual(JSON.parse(capturedLogin.options.body), {
+    op: "login",
+    userId: 7,
+    pin: "4321"
+  });
+  assert.strictEqual(sess.token, "minted-token");
+  assert.strictEqual(sess.expiresAt, "2026-08-17T08:00:00.000Z");
+  assert.strictEqual(sess.user.name, "Akshay");
+
+  console.log("browser bootstrap and v6 wire-shape tests passed");
 }
 
 run().catch(function (error) {

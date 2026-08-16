@@ -1,0 +1,37 @@
+# CI for ShopManager (checklist 1.3.7), modeled on the EE-Accounts CI gate
+# but strictly simpler: no services, no npm install, no lockfile.
+#
+# This workflow deliberately references no repository secrets. The test
+# suite is Node stdlib only and performs no network I/O of any kind --
+# every fetch is a stub -- so it cannot reach the production Supabase
+# project (buzidwccluskdkccidev) even by misconfiguration. Keep it that
+# way: never add SUPABASE_* secrets or live URLs here.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Run test suite (Node stdlib only, no network)
+        run: node scripts/run-tests.cjs

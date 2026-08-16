@@ -2,6 +2,12 @@
 
 ## Open
 
+- [ ] Deno-based contract tests for the `shop-write` Edge Function (phase 2 of checklist 1.3.7; deferred 2026-08-16).
+  - The client-side suite landed 2026-08-16 (`scripts/test-*.cjs` via the `vm` harness, run by `node scripts/run-tests.cjs` and `.github/workflows/ci.yml`). It pins the client half of the wire contract; the server half is untested.
+  - Wanted: the decision table in `supabase/functions/shop-write/index.ts` — token path vs PIN path vs `op:"login"` routing; `session_expired` vs `invalid_session` codes; token-path failures never writing `pin_attempts` (the lockout-DoS protection); `TABLE_FIELDS` / `pickFields` / `requiresCanDelete` gating.
+  - Mechanism: a Deno test imports the module (which starts the handler), points `SUPABASE_URL` at a small fake-PostgREST stub server the test also runs, and fires real HTTP at it. Deno is not installed on this machine, so CI-only via `denoland/setup-deno` is acceptable. Same rules as ci.yml: no secrets, no reachable path to `buzidwccluskdkccidev`.
+  - Known limit either way: deploys are copy-pasted through the dashboard Code tab, so tests of the repo's `index.ts` cannot prove the deployed function matches it. One manual end-to-end write after every deploy stays mandatory (RUNBOOK).
+
 - [ ] Remove plaintext `users.pin`. Login-path hashing landed 2026-08-13; the column remains because `shop-write` reads it.
   - Throttling (see Resolved) slows guessing but does not protect the stored value. Any DB dump, backup leak, or future SECURITY DEFINER mistake exposes every staff PIN at once.
   - Use `pgcrypto` `crypt()` with a per-row salt; migrate by rehashing existing PINs in place, then drop the plaintext column.
