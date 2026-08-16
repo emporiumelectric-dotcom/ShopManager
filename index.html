@@ -254,12 +254,33 @@ async function loadConfig(){
   }
   return result.config;
 }
-// All writes route through this Edge Function, which re-verifies the PIN
-// server-side (with rate limiting) before using its own service-role key --
-// direct client writes are blocked by RLS. See BACKLOG.md / commit history
-// for why. op: "insert"|"upsert"|"update"|"delete".
+// All writes route through this Edge Function, which authorizes each request
+// server-side before using its own service-role key -- direct client writes
+// are blocked by RLS. Since v6 the credential is a session token minted at
+// login (op:"login") rather than the raw PIN; the server still accepts the
+// PIN path for stale cached clients. See BACKLOG.md / commit history for
+// why. op: "insert"|"upsert"|"update"|"delete".
 async function callWrite(op,table,opts){
   opts=opts||{};
+  var payload=Object.assign({userId:ST.user?ST.user.id:null,token:ST.user?ST.user.token:null,op:op,table:table},opts);
+  var r=await postWrite(payload);
+  // Session hit its ~14h TTL mid-shift (tab left open overnight). Handled
+  // here so no call site has to: re-prompt for the PIN over whatever is on
+  // screen -- never render() or logout(), ST.cart and half-filled forms
+  // must survive -- then retry the original request once with the fresh
+  // token. Only an explicit session_expired 401 retries; network errors
+  // and timeouts never do (the write might have landed).
+  if(r.status===401&&r.body.code==="session_expired"&&await reauthPrompt()){
+    payload.token=ST.user?ST.user.token:null;
+    r=await postWrite(payload);
+  }
+  if(r.netError){return {data:null,error:{message:r.netError}};}
+  if(!r.ok){return {data:null,error:{message:r.body.error||("Request failed ("+r.status+")")}};}
+  return {data:r.body.data,error:null};
+}
+// One POST to shop-write. Returns {netError} on fetch failure, otherwise
+// {status,ok,body}; callers interpret.
+async function postWrite(payload){
   var {data:{session}}=await sb.auth.getSession();
   var token=session?session.access_token:SUPABASE_KEY;
   var res;
@@ -267,15 +288,53 @@ async function callWrite(op,table,opts){
     res=await fetch(WRITE_FN_URL,{
       method:"POST",
       headers:{"Authorization":"Bearer "+token,"apikey":SUPABASE_KEY,"Content-Type":"application/json"},
-      body:JSON.stringify(Object.assign({userId:ST.user?ST.user.id:null,pin:ST.user?ST.user.pin:null,op:op,table:table},opts))
+      body:JSON.stringify(payload)
     });
   }catch(e){
-    return {data:null,error:{message:"Network error: "+e.message}};
+    return {netError:"Network error: "+e.message};
   }
   var body;
   try{body=await res.json();}catch(e){body={};}
-  if(!res.ok){return {data:null,error:{message:body.error||("Request failed ("+res.status+")")}};}
-  return {data:body.data,error:null};
+  return {status:res.status,ok:res.ok,body:body};
+}
+// Mints a session via op:"login" -- the only request that carries the PIN,
+// which is never kept afterwards, not even in memory.
+async function mintSession(userId,pin){
+  var r=await postWrite({op:"login",userId:userId,pin:pin});
+  if(r.netError){return {error:r.netError};}
+  if(!r.ok||!r.body.token){return {error:r.body.error||("Login failed ("+r.status+")")};}
+  return {token:r.body.token,expiresAt:r.body.expiresAt};
+}
+var REAUTH=null; // in-flight re-auth prompt; concurrent expired writes share it
+function reauthPrompt(){
+  if(REAUTH)return REAUTH;
+  REAUTH=new Promise(function(resolve){
+    var wrap=document.createElement("div");
+    wrap.className="overlay";
+    wrap.style.zIndex="300";
+    wrap.innerHTML='<div class="modal" style="width:min(360px,100%)"><div class="mtitle">Session expired</div>'
+      +'<div style="font-size:13px;color:var(--muted);margin-bottom:1rem">Enter your PIN to continue, '+esc(ST.user?ST.user.name:"")+'. Nothing on screen is lost.</div>'
+      +'<div class="fg"><label>PIN</label><input type="password" id="rapin" maxlength="6" placeholder="Enter PIN" autocomplete="current-password"></div>'
+      +'<div class="err" id="raerr"></div>'
+      +'<div class="mactions"><button class="btn" id="racancel">Cancel</button><button class="btn btnp" id="raok">Continue &rarr;</button></div></div>';
+    document.body.appendChild(wrap);
+    function done(ok){wrap.remove();REAUTH=null;resolve(ok);}
+    async function submit(){
+      var pin=(G("rapin").value||"").trim();
+      if(!pin){G("raerr").textContent="Enter your PIN.";return;}
+      G("raok").disabled=true;
+      var sess=await mintSession(ST.user.id,pin);
+      G("raok").disabled=false;
+      if(sess.error){G("raerr").textContent=sess.error;G("rapin").value="";G("rapin").focus();return;}
+      ST.user.token=sess.token;ST.user.tokenExp=sess.expiresAt;
+      done(true);
+    }
+    G("raok").onclick=submit;
+    G("racancel").onclick=function(){done(false);};
+    G("rapin").onkeydown=function(e){if(e.key==="Enter")submit();};
+    G("rapin").focus();
+  });
+  return REAUTH;
 }
 
 var TODAYKEY=new Date().toISOString().slice(0,10);
@@ -545,7 +604,11 @@ async function doLogin(){
   var {data,error}=await sb.rpc("verify_pin",{p_user_id:uid,p_pin:pin});
   if(error||!data||!data.length){G("lerr").textContent="Wrong user or PIN.";return;}
   var u=data[0];
-  ST.user={id:u.id,name:u.name,role:u.role,canDelete:u.role==="owner"||!!u.can_delete,pin:pin};
+  // v6: swap the PIN for a session token (op:"login"). Without a token every
+  // write would fail, so a failed mint keeps us on the login screen.
+  var sess=await mintSession(uid,pin);
+  if(sess.error){G("lerr").textContent=sess.error;return;}
+  ST.user={id:u.id,name:u.name,role:u.role,canDelete:u.role==="owner"||!!u.can_delete,token:sess.token,tokenExp:sess.expiresAt};
   ST.storeId=storeId;
   var s=ST.stores.find(function(x){return x.id===storeId;});
   ST.storeName=s?s.name:"";
