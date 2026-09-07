@@ -9,13 +9,14 @@ GitHub Pages publishes only through the Actions workflows. Auto-deploy on push i
 - A push or merge by itself does not update the live site.
 - Pages artifacts are retained for 30 days as deployment evidence. Artifact IDs are not rollback handles.
 
-The current production-verified rollback handle is:
+The production-verified rollback handle is the git tag `prod-stable` — pass `prod-stable` as `commit_sha` to the rollback workflow (it resolves to a commit like any ref).
 
-```text
-733ac9dbf8741687597685fa08be9b73ed2d10a2
+After each deployment completes its installed-PWA verification gate, move the tag to the new commit and push it:
+
+```bash
+git tag -f prod-stable <verified-commit-sha>
+git push origin prod-stable --force
 ```
-
-Update this handle after each deployment completes its installed-PWA verification gate.
 
 ## Rollback behavior
 
