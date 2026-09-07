@@ -107,7 +107,7 @@ Deno.serve(async (req: Request) => {
     return json({ error: "Invalid JSON body" }, 400);
   }
 
-  const { userId, pin, token, op, table, values, match, onConflict } = body;
+  const { userId, pin, token, op, table, values, match, onConflict, requestId, storeId, type, ref, supplier, txnDate, byUser, lines } = body;
   const ip = getClientIp(req);
 
   const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
@@ -259,6 +259,30 @@ Deno.serve(async (req: Request) => {
 
     console.log(`shop-write: session minted for user ${userRow.id} from ${ip}, expires ${expiresAt}`);
     return json({ token: newToken, expiresAt, user: userRow });
+  }
+
+  if (op === "record_txn") {
+    // Atomic+idempotent sale/stock-in write (sql/atomic-transactions/001).
+    // Replaces the client's old 3-call sequence (insert transactions,
+    // insert transaction_items, update items.qty) that a retry after a
+    // partial failure could double-apply. requestId is the client-
+    // generated idempotency key; a replayed call returns the same
+    // transaction untouched rather than erroring or re-applying the delta.
+    if (!requestId || !storeId || !type || !txnDate || !byUser || !Array.isArray(lines) || !lines.length) {
+      return json({ error: "Missing required fields for record_txn" }, 400);
+    }
+    const { data, error } = await admin.rpc("shop_write_record_transaction", {
+      p_request_id: requestId,
+      p_store_id: storeId,
+      p_type: type,
+      p_ref: ref ?? null,
+      p_supplier: supplier ?? null,
+      p_txn_date: txnDate,
+      p_by_user: byUser,
+      p_lines: lines,
+    });
+    if (error) return json({ error: error.message }, 500);
+    return json({ data });
   }
 
   if (!op || !table) return json({ error: "op and table are required" }, 400);

@@ -353,6 +353,7 @@ var ST={
   user:null, users:[], stores:[], storeId:null, storeName:"",
   tab:"dashboard", inv:[], hist:[], cart:[], locations:[], defaultLocId:null, itemLocs:{},
   modal:null, editItem:null, invQ:"", invCat:"", invLocId:"", invPage:1, invPageSize:50,
+  saleReqId:null, siReqId:null,
   siRows:[{id:1,itemId:null,name:"",qty:1}], siSupplier:"", siRef:"", siDate:TODAYKEY, siLocId:null,
   trRows:[{id:1,itemId:null,name:"",qty:1}], trFromId:null, trToId:null,
   histQ:"", histFrom:"", histTo:"", loading:false, importStatus:"", switchModalOpen:false, editTxn:null
@@ -512,21 +513,29 @@ async function dbDeleteItem(id){
   if(error){alert("Error deleting item: "+error.message);return false;}
   return true;
 }
-async function dbRecordTransaction(type,meta,lines,extra){
-  var payload0=Object.assign({store_id:ST.storeId,type:type,ref:meta.ref||null,supplier:meta.supplier||null,txn_date:meta.date,by_user:ST.user.name},extra||{});
-  var {data,error}=await callWrite("insert","transactions",{values:payload0});
-  if(error||!data||!data.length){alert("Error saving transaction: "+(error?error.message:"unknown error"));return false;}
-  var txn=data[0];
-  var payload=lines.map(function(l){return{transaction_id:txn.id,item_id:l.itemId,item_name:l.name,qty:l.qty,location_id:l.locationId||null};});
-  var {error:e2}=await callWrite("insert","transaction_items",{values:payload});
-  if(e2){alert("Error saving line items: "+e2.message);return false;}
+// Records a sale ('out') or stock-in ('in') as one atomic, idempotent DB
+// call (shop_write_record_transaction, sql/atomic-transactions/001) instead
+// of 3 separate writes -- a network failure used to be able to leave a
+// transaction row with no line items, or double-apply the stock delta on
+// retry. meta.requestId is the caller's idempotency key: it MUST stay the
+// same across retries of one logical attempt (see doSubmitCart/saveSI,
+// which hold it on ST until success) and only vary for a genuinely new
+// transaction -- replaying the same id is what makes "click Save again
+// after a failure" safe.
+async function dbRecordTransaction(type,meta,lines){
+  var payload={requestId:meta.requestId,storeId:ST.storeId,type:type,ref:meta.ref||null,supplier:meta.supplier||null,txnDate:meta.date,byUser:ST.user.name,
+    lines:lines.map(function(l){return{item_id:l.itemId,item_name:l.name,qty:l.qty,location_id:l.locationId||null};})};
+  var {data,error}=await callWrite("record_txn",null,payload);
+  if(error||!data){alert("Error saving transaction: "+(error?error.message:"unknown error"));return false;}
+  (data.items||[]).forEach(function(it){
+    var item=ST.inv.find(function(x){return x.id===it.item_id;});
+    if(item)item.qty=Number(it.qty);
+  });
+  // Per-location stock breakdown is a separate, already-dormant write path
+  // (item_locations has 0 rows in production) -- left as-is, untouched by
+  // the atomic RPC above.
   for(var i=0;i<lines.length;i++){
-    var l=lines[i],item=ST.inv.find(function(x){return x.id===l.itemId;});
-    if(!item)continue;
-    var newQty=type==="out"?item.qty-l.qty:item.qty+l.qty;
-    await callWrite("update","items",{values:{qty:newQty,updated_at:new Date().toISOString()},match:{id:l.itemId}});
-    item.qty=newQty;
-    // Update per-location stock if location is set
+    var l=lines[i];
     if(l.locationId){
       var locDelta=type==="out"?-l.qty:l.qty;
       await dbUpdateLocStock(l.itemId,l.locationId,locDelta);
@@ -635,7 +644,7 @@ async function doLogin(){
   render();
   await loadStoreData(storeId);
 }
-function logout(){ST.user=null;ST.inv=[];ST.hist=[];ST.cart=[];render();}
+function logout(){ST.user=null;ST.inv=[];ST.hist=[];ST.cart=[];ST.saleReqId=null;ST.siReqId=null;render();}
 
 function renderMain(){
   var app=G("app");
@@ -734,7 +743,7 @@ function openStoreSwitch(){
       ST.storeId=sid;
       var s=ST.stores.find(function(x){return x.id===sid;});
       ST.storeName=s?s.name:"";
-      ST.cart=[];ST.tab="dashboard";
+      ST.cart=[];ST.saleReqId=null;ST.tab="dashboard";
       renderMain();
       await loadStoreData(sid);
     };
@@ -984,7 +993,7 @@ function addToCart(itemId){
 }
 function cartQty(idx,delta){if(!ST.cart[idx])return;ST.cart[idx].qty=Math.max(1,ST.cart[idx].qty+delta);renderCartBody();}
 function cartRemove(idx){ST.cart.splice(idx,1);renderCartBody();renderNav();}
-function cartClear(){if(!confirm("Clear all "+ST.cart.length+" items?"))return;ST.cart=[];renderCartBody();renderNav();}
+function cartClear(){if(!confirm("Clear all "+ST.cart.length+" items?"))return;ST.cart=[];ST.saleReqId=null;renderCartBody();renderNav();}
 function openSubmitCart(){
   if(!ST.cart.length){alert("Cart is empty.");return;}
   var ml=G("ml");
@@ -1006,8 +1015,16 @@ async function doSubmitCart(){
   var ref=(G("sref")||{}).value||"";
   var date=(G("sdate")||{}).value||TODAYKEY;
   var lines=ST.cart.map(function(r){return Object.assign({},r,{locationId:r.locationId||ST.defaultLocId||null});});
-  var ok=await dbRecordTransaction("out",{ref:ref,date:date},lines);
+  // ponytail: saleReqId survives a failed attempt so re-clicking Confirm
+  // safely replays instead of double-selling, but qty +/- and remove-item
+  // don't clear it -- editing the cart between a silent-success failure and
+  // a retry would replay the OLD line items under the new click. cartClear()
+  // resets it; upgrade to resetting on every cart mutation if that edit-then-
+  // retry sequence turns out to happen in practice.
+  ST.saleReqId=ST.saleReqId||crypto.randomUUID();
+  var ok=await dbRecordTransaction("out",{ref:ref,date:date,requestId:ST.saleReqId},lines);
   if(!ok){btn.disabled=false;btn.textContent="\u2713 Confirm & deduct";return;}
+  ST.saleReqId=null;
   var count=ST.cart.length;ST.cart=[];closeML();
   await loadStoreData(ST.storeId);
   toast(count+" item(s) deducted from "+ST.storeName+" and synced.");
@@ -1074,7 +1091,7 @@ function onSISearch(val,rowId){
   ac.classList.remove("hidden");
 }
 function siQD(rowId,d){var r=ST.siRows.find(function(x){return x.id===rowId;});if(r)r.qty=Math.max(1,r.qty+d);renderSIRows();}
-function clearSI(){ST.siRows=[{id:Date.now(),itemId:null,name:"",qty:1}];ST.siSupplier="";ST.siRef="";ST.siDate=TODAYKEY;ST.siLocId=ST.defaultLocId;renderTab();}
+function clearSI(){ST.siRows=[{id:Date.now(),itemId:null,name:"",qty:1}];ST.siSupplier="";ST.siRef="";ST.siDate=TODAYKEY;ST.siLocId=ST.defaultLocId;ST.siReqId=null;renderTab();}
 async function saveSI(){
   var valid=ST.siRows.filter(function(r){return r.itemId&&r.qty>0;});
   if(!valid.length){alert("Add at least one item.");return;}
@@ -1082,8 +1099,10 @@ async function saveSI(){
   // Attach the selected location to every line
   var lines=valid.map(function(r){return Object.assign({},r,{locationId:ST.siLocId||null});});
   var locName=ST.locations.find(function(l){return l.id===ST.siLocId;});
-  var ok=await dbRecordTransaction("in",{supplier:ST.siSupplier,ref:ST.siRef,date:ST.siDate,location_id:ST.siLocId||null},lines);
+  ST.siReqId=ST.siReqId||crypto.randomUUID();
+  var ok=await dbRecordTransaction("in",{supplier:ST.siSupplier,ref:ST.siRef,date:ST.siDate,requestId:ST.siReqId},lines);
   if(!ok){btn.disabled=false;btn.textContent="\u2713 Save & add to stock";return;}
+  ST.siReqId=null;
   await loadStoreData(ST.storeId);
   toast("Stock IN recorded"+(locName?" at "+locName.name:"")+". "+valid.length+" item(s) added.");
   clearSI();

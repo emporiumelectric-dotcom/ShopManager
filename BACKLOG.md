@@ -35,7 +35,24 @@
   - The current source routes the mutation calls in these paths through `callWrite`, but this still needs an end-to-end network/Edge Function verification.
   - Confirm anon clients cannot write the affected tables directly. Successful writes alone do not prove whether they used `shop-write` or permissive RLS.
 
+- [ ] `dbTransferStock` (Transfer Stock feature) is broken in production. Found 2026-09-08 while scoping the atomic-transaction work below.
+  - It inserts `transactions` with `type:"transfer"` (`index.html`), but the live `transactions_type_check` CHECK constraint only allows `'in'`/`'out'`. Confirmed on `buzidwccluskdkccidev`: every distinct `type` value in the table is `'in'` or `'out'` — no transfer has ever successfully recorded.
+  - The failure is silent to staff beyond a generic error: `dbTransferStock` catches it and returns `false`, same as any other write error, so this may have gone unnoticed rather than unused.
+  - Also note: `item_locations.item_id` is `bigint` but `items.id` is `uuid` — a pre-existing type mismatch, and `item_locations` has 0 rows in production, consistent with this whole location-breakdown path never having worked.
+  - Fix is either widening the CHECK constraint (if transfers should be a real third type) or reworking the feature; out of scope for the atomic-transaction change below, which deliberately did not touch `dbTransferStock`.
+
 ## Resolved
+
+- [x] Silent read failures now surface to staff. Resolved 2026-09-07.
+  - All 6 data-layer read functions (`fetchStores`, `fetchLocations`, `fetchItemLocs`, `fetchUsers`, `fetchItems`, `fetchHistory`) caught errors with only `console.error` and returned `[]` — a network blip or RLS change looked exactly like an empty inventory/history, indistinguishable from real data loss.
+  - Each now also calls the existing `toast(msg, true)` — no new UI, no new abstraction, reused what was already there.
+
+- [x] Sale/stock-in writes made atomic and idempotent (`dbRecordTransaction`, sale + stock-in only — not transfers, see Open above). Resolved 2026-09-08.
+  - Was 3 sequential `callWrite` calls (insert `transactions`, insert `transaction_items`, update `items.qty`). A network failure between any of them left a partial write, and retrying could double-insert the transaction and double-apply the stock delta — there was no safe way to retry after a dropped connection mid-sale.
+  - Now one atomic, idempotent call: `shop_write_record_transaction` (`sql/atomic-transactions/001`, SECURITY DEFINER, service-role only), keyed by a client-generated `request_id` (`transactions.request_id`, nullable + UNIQUE). Replaying the same `request_id` returns the original transaction untouched instead of erroring or re-applying the delta; a genuine concurrent race on the same id is caught (`unique_violation`) and treated as a replay too. `items.qty` is now `qty = qty + delta` server-side instead of the client sending a precomputed absolute value (was racy across two devices selling concurrently).
+  - `shop-write` v8 adds `op:"record_txn"` calling the RPC; every other op is unchanged. Client: `doSubmitCart`/`saveSI` hold the `request_id` on `ST.saleReqId`/`ST.siReqId` across a failed attempt so re-clicking Save safely replays instead of double-selling; cleared on success, cart/rows clear, logout, and store switch. Known gap: qty +/- and remove-single-item don't clear it (see `ponytail:` comment at the call site) — bounded edge case, not a full offline write queue (that needs cart persistence first, which this did not add).
+  - Verified: SQL rehearsal (`sql/atomic-transactions/002`, throwaway store/items/request_ids, proves idempotency + EXECUTE lockdown, self-cleaning) and a live HTTP smoke test against the deployed v8 function (throwaway user/session/store/item, first call + replay with a different payload, cleaned up). `node scripts/run-tests.cjs` (new `test-record-transaction.cjs`) passes, 6/6 files.
+  - Does NOT touch `dbTransferStock`, `item_locations`, or per-location stock breakdown — see the new Open item above.
 
 - [x] Throttle `verify_pin` against brute force. Resolved 2026-08-12.
   - Was `LANGUAGE sql`, unthrottled, and EXECUTE-able by `authenticated`. With anonymous sign-in enabled, any stranger could mint a JWT and brute-force a 4-digit staff PIN. The `shop-write` rate limit does not cover direct RPC calls.
