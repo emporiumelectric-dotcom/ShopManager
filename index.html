@@ -375,12 +375,12 @@ function rowToItem(r){return {id:r.id, name:r.name, cat:r.category||"", company:
 // ===== DATA LAYER (Supabase) =====
 async function fetchStores(){
   var {data,error}=await sb.from("stores").select("*").order("name");
-  if(error){console.error(error);return [];}
+  if(error){console.error(error);toast("Couldn't load stores — check connection.",true);return [];}
   return data||[];
 }
 async function fetchLocations(storeId){
   var {data,error}=await sb.from("locations").select("*").eq("store_id",storeId).order("is_default",{ascending:false}).order("name");
-  if(error){console.error(error);return [];}
+  if(error){console.error(error);toast("Couldn't load locations — check connection.",true);return [];}
   return data||[];
 }
 async function fetchItemLocs(locIds){
@@ -388,7 +388,7 @@ async function fetchItemLocs(locIds){
   var all=[],from=0,pageSize=2000;
   while(true){
     var {data,error}=await sb.from("item_locations").select("item_id,location_id,qty").in("location_id",locIds).range(from,from+pageSize-1);
-    if(error){console.error(error);break;}
+    if(error){console.error(error);toast("Couldn't load stock levels — check connection.",true);break;}
     if(!data||data.length===0)break;
     all=all.concat(data);
     if(data.length<pageSize)break;
@@ -442,7 +442,7 @@ async function dbTransferStock(fromLocId,toLocId,lines){
 }
 async function fetchUsers(){
   var {data,error}=await sb.from("users_public").select("id,name,role,can_delete").order("role").order("name");
-  if(error){console.error(error);return [];}
+  if(error){console.error(error);toast("Couldn't load staff list — check connection.",true);return [];}
   return (data||[]).map(function(r){return {id:r.id,name:r.name,role:r.role,canDelete:r.role==="owner"||!!r.can_delete};});
 }
 async function fetchItems(storeId){
@@ -451,7 +451,7 @@ async function fetchItems(storeId){
   var pageSize=1000, from=0, all=[];
   while(true){
     var {data,error}=await sb.from("items").select("*").eq("store_id",storeId).order("name").range(from,from+pageSize-1);
-    if(error){console.error(error);break;}
+    if(error){console.error(error);toast("Couldn't load inventory — check connection.",true);break;}
     if(!data||data.length===0)break;
     all=all.concat(data);
     if(data.length<pageSize)break; // last page
@@ -461,7 +461,7 @@ async function fetchItems(storeId){
 }
 async function fetchHistory(storeId){
   var {data,error}=await sb.from("transactions").select("*, transaction_items(*)").eq("store_id",storeId).order("created_at",{ascending:false}).limit(300);
-  if(error){console.error("fetchHistory error:",error);return [];}
+  if(error){console.error("fetchHistory error:",error);toast("Couldn't load history — check connection.",true);return [];}
   return (data||[]).map(function(t){
     // Resolve location names from already-loaded ST.locations (works even if columns are null/missing)
     var fromLoc=t.from_location_id?ST.locations.find(function(l){return l.id===t.from_location_id;}):null;
