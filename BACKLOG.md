@@ -37,6 +37,17 @@
 
 ## Resolved
 
+- [x] Team Activity report added to the Reports tab (owner-only). Resolved 2026-09-08.
+  - New card at the top of the Reports tab landing view, visible only to the owner (role-gated both in nav and defensively inside `teamActivityCardHtml()`). Shows each staff member's share of transaction entries as an SVG donut chart + legend with tap-to-expand drill-down (Sales / Stock-in / Transfers with per-type %). Period selector: Today / This Week / This Month / Custom (custom reveals two date inputs). Defaults to This Month.
+  - Read-only. No new table, no new write path, no migration. One new small `sb.from("transactions")` read (`fetchTeamActivity`) filtered by date range only — deliberately no `store_id` filter so both locations are combined per spec. All client-side aggregation.
+  - `computePeriodRange`, `aggregateTeamActivity`, `polarToXY`, `donutSlicePath` are pure helpers tested in `scripts/test-team-activity.cjs` (15/15 — confirmed via `node scripts/run-tests.cjs`, now 8/8 files).
+  - Uses the dataviz-validated 8-slot categorical palette; falls back to neutral gray past slot 8 (7 staff, so this is a defensive floor only). Week start = Monday (ISO-8601), derived from `TODAYKEY` (not a fresh `new Date()`) to stay consistent with the rest of the app's UTC date convention.
+  - Stale-response guard: `ST.taCacheKey` is set before `await fetchTeamActivity(...)` so a period switch while a fetch is in flight discards the stale response rather than clobbering the newer one.
+  - SVG degenerate case handled: a single-person 100% slice uses two concentric circles instead of a wedge arc (start == end point = invisible wedge in SVG).
+  - **Cross-check (2026-09-08, "This Month" period, 2026-09-01 → 2026-09-08):** Direct SQL vs. UI totals — Lokesh Sharnagat: 16 out (total 16); Manish Bhagat: 10 out + 1 transfer (total 11); Tapesh Thakre: 6 out (total 6); Akshay Harde: 2 out (total 2). Numbers matched exactly.
+  - **Known caveat — single store:** Only one `store_id` has any transactions in production as of 2026-09-08 (the second store has no history). The "combine both locations" behaviour is correct in the code (no `store_id` filter in `fetchTeamActivity`) but can't be verified end-to-end until the second store has entries. If you suspect a discrepancy later, run: `select store_id, count(*) from public.transactions group by store_id;` to confirm whether both stores are represented.
+  - Transfers: Manish Bhagat's 1 transfer entry confirmed that the Transfer Stock fix (resolved 2026-09-08 separately) is recording `'transfer'` type rows in production — so the "Transfers 0 for everyone" footnote does not appear for this period.
+
 - [x] Silent read failures now surface to staff. Resolved 2026-09-07.
   - All 6 data-layer read functions (`fetchStores`, `fetchLocations`, `fetchItemLocs`, `fetchUsers`, `fetchItems`, `fetchHistory`) caught errors with only `console.error` and returned `[]` — a network blip or RLS change looked exactly like an empty inventory/history, indistinguishable from real data loss.
   - Each now also calls the existing `toast(msg, true)` — no new UI, no new abstraction, reused what was already there.
