@@ -469,11 +469,13 @@ async function fetchHistory(storeId){
   var {data,error}=await sb.from("transactions").select("*, transaction_items(*)").eq("store_id",storeId).order("created_at",{ascending:false}).limit(300);
   if(error){console.error("fetchHistory error:",error);toast("Couldn't load history — check connection.",true);return [];}
   return (data||[]).map(function(t){
-    // Resolve location names from already-loaded ST.locations (works even if columns are null/missing)
-    var fromLoc=t.from_location_id?ST.locations.find(function(l){return l.id===t.from_location_id;}):null;
-    var toLoc=t.to_location_id?ST.locations.find(function(l){return l.id===t.to_location_id;}):null;
+    // Raw ids only -- NOT resolved to names here. This runs inside
+    // loadStoreData before ST.locations is (re)assigned, so looking up
+    // names against ST.locations at this point used stale/empty data on
+    // first load. Resolved against the always-current ST.locations at
+    // render time instead (renderHist).
     return {id:t.id,type:t.type,ref:t.ref||"—",supplier:t.supplier||"—",date:t.txn_date,by:t.by_user||"—",
-      fromLoc:fromLoc?fromLoc.name:null,toLoc:toLoc?toLoc.name:null,
+      fromLocId:t.from_location_id,toLocId:t.to_location_id,
       items:(t.transaction_items||[]).map(function(li){return{id:li.id,itemId:li.item_id,name:li.item_name,qty:Number(li.qty),locationId:li.location_id};})};
   });
 }
@@ -1213,7 +1215,11 @@ function renderHist(tc){
     var isTransfer=entry.type==="transfer";
     var typeLabel=isTransfer?"&#8651; Transfer":entry.type==="in"?"&#128229; Stock IN":"&#128722; Sale OUT";
     var typeClass=isTransfer?"binfo":entry.type==="in"?"tin":"tout";
-    var meta=isTransfer?("From: "+esc(entry.fromLoc||"?")+" &rarr; To: "+esc(entry.toLoc||"?")):(entry.type==="in"?"Supplier: "+esc(entry.supplier||"—")+" &middot; Ref: "+esc(entry.ref||"—"):"Ref: "+esc(entry.ref||"—"));
+    // Names resolved here, not in fetchHistory -- ST.locations is always
+    // current by render time (loadStoreData assigns it before rendering).
+    var fromLocName=isTransfer&&entry.fromLocId?(ST.locations.find(function(l){return l.id===entry.fromLocId;})||{}).name:null;
+    var toLocName=isTransfer&&entry.toLocId?(ST.locations.find(function(l){return l.id===entry.toLocId;})||{}).name:null;
+    var meta=isTransfer?("From: "+esc(fromLocName||"?")+" &rarr; To: "+esc(toLocName||"?")):(entry.type==="in"?"Supplier: "+esc(entry.supplier||"—")+" &middot; Ref: "+esc(entry.ref||"—"):"Ref: "+esc(entry.ref||"—"));
     var actions=(!isTransfer&&canDelete)?'<button class="btn btnsm edittxnbtn" data-id="'+entry.id+'">&#9998; Edit</button><button class="btn btnsm btnd deltxnbtn" data-id="'+entry.id+'">&#128465; Delete</button>':"";
     return '<div class="hist-entry"><div class="hist-head"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="hist-type '+typeClass+'">'+typeLabel+'</span><span style="font-size:13px;font-weight:600;color:var(--ink)">'+meta+'</span></div><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><div style="font-size:12px;color:var(--faint)">'+entry.date+' &middot; by '+esc(entry.by)+'</div>'+actions+'</div></div><table style="min-width:0"><thead><tr><th>Item</th><th style="width:60px">Qty</th></tr></thead><tbody>'+irows+'</tbody></table></div>';
   }).join("");
