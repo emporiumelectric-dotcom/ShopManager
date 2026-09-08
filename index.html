@@ -356,7 +356,8 @@ var ST={
   saleReqId:null, siReqId:null,
   siRows:[{id:1,itemId:null,name:"",qty:1}], siSupplier:"", siRef:"", siDate:TODAYKEY, siLocId:null,
   trRows:[{id:1,itemId:null,name:"",qty:1}], trFromId:null, trToId:null, trReqId:null,
-  histQ:"", histFrom:"", histTo:"", loading:false, importStatus:"", switchModalOpen:false, editTxn:null
+  histQ:"", histFrom:"", histTo:"", loading:false, importStatus:"", switchModalOpen:false, editTxn:null,
+  taPeriod:"month", taFrom:"", taTo:"", taCacheKey:null, taRows:[], taExpanded:{}
 };
 
 function G(id){return document.getElementById(id);}
@@ -478,6 +479,15 @@ async function fetchHistory(storeId){
       fromLocId:t.from_location_id,toLocId:t.to_location_id,
       items:(t.transaction_items||[]).map(function(li){return{id:li.id,itemId:li.item_id,name:li.item_name,qty:Number(li.qty),locationId:li.location_id};})};
   });
+}
+// Team Activity report only (owner-only Reports tab). Deliberately NOT
+// scoped to ST.storeId or ST.hist: ST.hist is capped at 300 rows and is
+// per-store, but this report needs the full period across BOTH locations
+// combined (per spec) -- so it's its own small, uncached read.
+async function fetchTeamActivity(fromDate,toDate){
+  var {data,error}=await sb.from("transactions").select("type,by_user,txn_date").gte("txn_date",fromDate).lte("txn_date",toDate);
+  if(error){console.error(error);toast("Couldn't load team activity — check connection.",true);return [];}
+  return data||[];
 }
 async function loadStoreData(storeId){
   ST.loading=true;render();
@@ -1653,6 +1663,222 @@ function findDuplicateGroups(){
   });
   return Object.values(groups).filter(function(g){return g.length>1;});
 }
+// ===== TEAM ACTIVITY REPORT =====
+// Owner-only. Reads public.transactions directly (no ST.hist reuse -- that's
+// capped at 300 rows AND scoped to one store; this report needs the full
+// period across both locations). All pure/no-DOM helpers live here so they
+// can be unit tested in isolation (scripts/test-team-activity.cjs); the
+// fetch + render/wiring functions that use ST/DOM follow further down.
+
+// Dataviz-validated categorical palette, fixed order, never cycled or
+// re-generated (an unlisted 9th person falls back to a neutral gray in
+// assignTeamActivityColors below, per the same rule).
+var TEAM_ACTIVITY_PALETTE=["#2a78d6","#eb6834","#1baf7a","#eda100","#e87ba4","#008300","#4a3aa7","#e34948"];
+
+// "Business day" boundary reused as-is from TODAYKEY (UTC calendar date --
+// see index.html top of file): this feature does not invent a new one.
+// Week start is a genuinely new concept this feature needs (nothing else in
+// the app has a week boundary) -- Monday, ISO-8601 style.
+//
+// Week/month math derives from TODAYKEY itself (parsed back into a Date),
+// NOT a fresh `new Date()` call -- TODAYKEY is this app's single source of
+// truth for "today" (computed once at page load), and a second independent
+// `new Date()` here would silently disagree with it if the tab were left
+// open across a UTC midnight rollover. Deriving from TODAYKEY also makes
+// this deterministic/testable without mocking the system clock.
+function computePeriodRange(period,customFrom,customTo){
+  if(period==="today")return {from:TODAYKEY,to:TODAYKEY};
+  var today=new Date(TODAYKEY+"T00:00:00.000Z");
+  if(period==="week"){
+    var dow=today.getUTCDay(); // 0=Sun..6=Sat
+    var mondayOffset=(dow+6)%7; // days since the most recent Monday
+    var monday=new Date(today);
+    monday.setUTCDate(today.getUTCDate()-mondayOffset);
+    return {from:monday.toISOString().slice(0,10),to:TODAYKEY};
+  }
+  if(period==="month"){
+    var first=new Date(Date.UTC(today.getUTCFullYear(),today.getUTCMonth(),1));
+    return {from:first.toISOString().slice(0,10),to:TODAYKEY};
+  }
+  return {from:customFrom||TODAYKEY,to:customTo||TODAYKEY};
+}
+
+// rows: [{type,by_user,txn_date}]. Sorted descending by total (ties: stable,
+// insertion order -- "no special handling needed" per spec). A staff member
+// with zero rows in the period simply never gets a group -- nothing to
+// filter out. type is 'in'|'out' in production today; 'transfer' is included
+// defensively (grouped into .transfer) so this starts working the moment the
+// separately-tracked Transfer Stock bug (BACKLOG.md) is fixed, with no
+// change needed here.
+function aggregateTeamActivity(rows){
+  var byPerson={};
+  rows.forEach(function(r){
+    var name=r.by_user||"Unknown";
+    if(!byPerson[name])byPerson[name]={name:name,total:0,out:0,in:0,transfer:0};
+    var p=byPerson[name];
+    p.total++;
+    if(r.type==="out")p.out++;
+    else if(r.type==="in")p.in++;
+    else p.transfer++;
+  });
+  return Object.keys(byPerson).map(function(k){return byPerson[k];}).sort(function(a,b){return b.total-a.total;});
+}
+
+function assignTeamActivityColors(people){
+  return people.map(function(p,i){return Object.assign({},p,{color:TEAM_ACTIVITY_PALETTE[i]||"#9AA1AE"});});
+}
+
+// angle in radians, 0 = 12 o'clock, clockwise (matches how the slice loop
+// in buildTeamActivityDonutSVG accumulates angles).
+function polarToXY(cx,cy,r,angle){
+  return {x:cx+r*Math.sin(angle),y:cy-r*Math.cos(angle)};
+}
+
+// One donut wedge as an SVG path `d`. A start===end angle (degenerate --
+// can happen transiently while data loads) still returns a finite,
+// zero-length path rather than NaN.
+function donutSlicePath(cx,cy,rOuter,rInner,startAngle,endAngle){
+  var p1=polarToXY(cx,cy,rOuter,startAngle);
+  var p2=polarToXY(cx,cy,rOuter,endAngle);
+  var p3=polarToXY(cx,cy,rInner,endAngle);
+  var p4=polarToXY(cx,cy,rInner,startAngle);
+  var large=(endAngle-startAngle)>Math.PI?1:0;
+  return ["M",p1.x,p1.y,"A",rOuter,rOuter,0,large,1,p2.x,p2.y,"L",p3.x,p3.y,"A",rInner,rInner,0,large,0,p4.x,p4.y,"Z"].join(" ");
+}
+
+// Builds the donut SVG for however many people have activity this period.
+// Special-cased at 1 person: a single A-command arc from angle 0 to 2*PI is
+// degenerate in SVG (start point === end point, nothing renders), so a lone
+// 100% slice is drawn as two concentric circles instead of a wedge path.
+function buildTeamActivityDonutSVG(people){
+  var size=180,cx=size/2,cy=size/2,rOuter=80,rInner=48;
+  if(people.length===0)return "";
+  if(people.length===1){
+    var only=people[0];
+    return '<svg viewBox="0 0 '+size+' '+size+'" width="'+size+'" height="'+size+'" role="img" aria-label="'+esc(only.name)+': 100%">'
+      +'<circle cx="'+cx+'" cy="'+cy+'" r="'+rOuter+'" fill="'+only.color+'"></circle>'
+      +'<circle cx="'+cx+'" cy="'+cy+'" r="'+rInner+'" fill="#fff"></circle>'
+      +'</svg>';
+  }
+  var grandTotal=people.reduce(function(s,p){return s+p.total;},0)||1;
+  var angle=0;
+  var wedges=people.map(function(p){
+    var start=angle;
+    var end=angle+(p.total/grandTotal)*Math.PI*2;
+    angle=end;
+    var pct=Math.round(p.total/grandTotal*100);
+    return '<path d="'+donutSlicePath(cx,cy,rOuter,rInner,start,end)+'" fill="'+p.color+'" stroke="#fff" stroke-width="2" tabindex="0" data-ta-toggle="'+esc(p.name)+'" style="cursor:pointer"><title>'+esc(p.name)+': '+p.total+' ('+pct+'%)</title></path>';
+  }).join("");
+  return '<svg viewBox="0 0 '+size+' '+size+'" width="'+size+'" height="'+size+'" role="img" aria-label="Team activity by person">'+wedges+'</svg>';
+}
+
+function teamActivityLegendHtml(people,grandTotal){
+  return people.map(function(p){
+    var pct=Math.round(p.total/grandTotal*100);
+    var expanded=!!ST.taExpanded[p.name];
+    var detail="";
+    if(expanded){
+      var ownTotal=p.total||1;
+      var rows=[
+        {label:"Sales",count:p.out},
+        {label:"Stock-in",count:p.in},
+        {label:"Transfers",count:p.transfer}
+      ];
+      detail='<div style="padding:8px 0 4px 26px;font-size:12.5px;color:var(--muted)">'
+        +rows.map(function(r){return '<div style="display:flex;justify-content:space-between;padding:3px 0"><span>'+r.label+'</span><span>'+r.count+' &middot; '+Math.round(r.count/ownTotal*100)+'%</span></div>';}).join("")
+        +'</div>';
+    }
+    return '<div class="ta-legend-row" data-ta-toggle="'+esc(p.name)+'" style="cursor:pointer;padding:8px 0;border-bottom:1px solid var(--line2)">'
+      +'<div style="display:flex;align-items:center;gap:10px"><span style="width:12px;height:12px;border-radius:3px;background:'+p.color+';flex-shrink:0"></span>'
+      +'<span style="flex:1;font-weight:600;font-size:13.5px">'+esc(p.name)+'</span>'
+      +'<span style="font-size:12.5px;color:var(--muted)">'+p.total+' &middot; '+pct+'%</span>'
+      +'<span style="color:var(--faint);font-size:11px">'+(expanded?"&#9650;":"&#9660;")+'</span></div>'
+      +detail+'</div>';
+  }).join("");
+}
+
+function teamActivityPeriodControlHtml(){
+  var periods=[["today","Today"],["week","This Week"],["month","This Month"],["custom","Custom"]];
+  var btns=periods.map(function(p){return '<button class="btn btnsm'+(ST.taPeriod===p[0]?" btnp":"")+'" data-ta-period="'+p[0]+'" style="margin-right:6px">'+p[1]+'</button>';}).join("");
+  var customRow=ST.taPeriod==="custom"
+    ?'<div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><label style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase">From</label><input type="date" id="tafrom" value="'+esc(ST.taFrom)+'" style="max-width:160px"><label style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase">To</label><input type="date" id="tato" value="'+esc(ST.taTo)+'" style="max-width:160px"></div>'
+    :"";
+  return '<div style="margin-bottom:1rem">'+btns+customRow+'</div>';
+}
+
+// Top-level card for the Reports tab landing view. Owner-gated defensively
+// here too (not just by nav hiding the tab) -- mirrors this codebase's
+// stated stance that a UI-only gate is not a real gate (see shop-write's
+// requiresCanDelete comment).
+function teamActivityCardHtml(){
+  if(!ST.user||ST.user.role!=="owner")return "";
+  var range=computePeriodRange(ST.taPeriod,ST.taFrom,ST.taTo);
+  var key=range.from+"_"+range.to;
+  var body;
+  if(ST.taCacheKey!==key){
+    body='<div class="loadwrap"><span class="spinner"></span> Loading team activity...</div>';
+  }else{
+    var people=assignTeamActivityColors(aggregateTeamActivity(ST.taRows));
+    if(!people.length){
+      body='<div style="color:var(--faint);font-size:13px;text-align:center;padding:1.5rem">No sales, stock-in, or transfers recorded in this period.</div>';
+    }else{
+      var grandTotal=people.reduce(function(s,p){return s+p.total;},0);
+      body='<div style="display:flex;gap:1.5rem;flex-wrap:wrap;align-items:flex-start">'
+        +'<div>'+buildTeamActivityDonutSVG(people)+'</div>'
+        +'<div style="flex:1;min-width:220px">'+teamActivityLegendHtml(people,grandTotal)+'</div>'
+        +'</div>'
+        +(people.every(function(p){return p.transfer===0;})?'<div style="font-size:11px;color:var(--faint);margin-top:10px">Transfers show 0 for everyone — the Transfer Stock feature is separately tracked as broken in BACKLOG.md, not a bug in this report.</div>':"");
+    }
+  }
+  return '<div class="card"><div class="ctitle">Team Activity</div>'+teamActivityPeriodControlHtml()+body+'</div>';
+}
+
+// Fires the read exactly once per distinct period (cache key = the resolved
+// date range). Sets ST.taCacheKey BEFORE awaiting so a second renderTab()
+// call for the same period (e.g. from an unrelated state change while the
+// fetch is in flight) doesn't start a duplicate request -- same in-flight-
+// guard shape already used for login/re-auth in this file. If the period is
+// switched again before the first fetch resolves, that response is now
+// stale (ST.taCacheKey no longer matches) and is dropped instead of
+// clobbering the newer one.
+async function ensureTeamActivityData(){
+  if(!ST.user||ST.user.role!=="owner")return;
+  var range=computePeriodRange(ST.taPeriod,ST.taFrom,ST.taTo);
+  var key=range.from+"_"+range.to;
+  if(ST.taCacheKey===key)return;
+  ST.taCacheKey=key;
+  var rows=await fetchTeamActivity(range.from,range.to);
+  if(ST.taCacheKey!==key)return; // a newer period took over while this was in flight
+  ST.taRows=rows;
+  renderTab();
+}
+
+// Scoped to tc (the Reports tab container), not document -- matches this
+// file's existing convention of scoping querySelectorAll to the container
+// that was just written (e.g. openStoreSwitch's `ml.querySelectorAll(...)`)
+// rather than querying the whole page.
+function wireTeamActivityHandlers(tc){
+  if(!ST.user||ST.user.role!=="owner")return;
+  tc.querySelectorAll("[data-ta-period]").forEach(function(btn){
+    btn.onclick=function(){
+      ST.taPeriod=this.dataset.taPeriod;
+      if(ST.taPeriod!=="custom"){ST.taFrom="";ST.taTo="";}
+      renderTab();
+      ensureTeamActivityData();
+    };
+  });
+  var fromInput=G("tafrom"),toInput=G("tato");
+  if(fromInput)fromInput.onchange=function(){ST.taFrom=this.value;renderTab();ensureTeamActivityData();};
+  if(toInput)toInput.onchange=function(){ST.taTo=this.value;renderTab();ensureTeamActivityData();};
+  tc.querySelectorAll("[data-ta-toggle]").forEach(function(el){
+    el.onclick=function(){
+      var name=this.dataset.taToggle;
+      ST.taExpanded[name]=!ST.taExpanded[name];
+      renderTab();
+    };
+  });
+}
+
 function renderReports(tc){
   var cats={};
   ST.inv.forEach(function(i){var c=i.cat||"UNCATEGORISED";if(!cats[c])cats[c]={count:0,neg:0};cats[c].count++;if(i.qty<0)cats[c].neg++;});
@@ -1669,10 +1895,13 @@ function renderReports(tc){
     var total=g.reduce(function(s,i){return s+i.qty;},0);
     return "<div style='margin-bottom:10px;border:1px solid #f0f0f0;border-radius:8px;padding:8px'><table><tbody>"+rows+"</tbody></table><div style='font-size:11px;color:#888;padding:4px 4px 0'>Will merge into one row, qty "+total+"</div></div>";
   }).join("");
-  tc.innerHTML='<div class="mgrid"><div class="metric"><div class="mlabel">Total Items</div><div class="mval">'+ST.inv.length.toLocaleString("en-IN")+'</div></div><div class="metric"><div class="mlabel">Sale Entries</div><div class="mval">'+outE+'</div></div><div class="metric"><div class="mlabel">Stock IN</div><div class="mval">'+inE+'</div></div><div class="metric"><div class="mlabel">Negative Stock</div><div class="mval danger">'+negItems.length+'</div></div></div><div class="card"><div class="ctitle">Items by category &mdash; '+esc(ST.storeName)+'</div>'+(bars||"<div style='color:#aaa;font-size:13px'>No items yet.</div>")+'</div>'
+  tc.innerHTML=teamActivityCardHtml()
+    +'<div class="mgrid"><div class="metric"><div class="mlabel">Total Items</div><div class="mval">'+ST.inv.length.toLocaleString("en-IN")+'</div></div><div class="metric"><div class="mlabel">Sale Entries</div><div class="mval">'+outE+'</div></div><div class="metric"><div class="mlabel">Stock IN</div><div class="mval">'+inE+'</div></div><div class="metric"><div class="mlabel">Negative Stock</div><div class="mval danger">'+negItems.length+'</div></div></div><div class="card"><div class="ctitle">Items by category &mdash; '+esc(ST.storeName)+'</div>'+(bars||"<div style='color:#aaa;font-size:13px'>No items yet.</div>")+'</div>'
     +'<div class="card"><div class="ctitle"><span>Duplicate items ('+dupGroups.length+' group'+(dupGroups.length===1?"":"s")+')</span>'+(dupGroups.length?'<button class="btn btnsm btnd" id="mergeallbtn">Merge all duplicates</button>':"")+'</div>'+(dupGroups.length?'<div style="font-size:12px;color:#666;margin-bottom:10px">Items with the exact same name (ignoring case/spacing). Merging sums their quantities into one row and removes the rest. Showing '+Math.min(30,dupGroups.length)+' of '+dupGroups.length+'.</div>'+dupHtml:"<div style='color:#aaa;font-size:13px'>No duplicate names found.</div>")+'<div id="dupstatus"></div></div>'
     +(negItems.length?'<div class="card"><div class="ctitle">Negative stock ('+negItems.length+')</div><div class="twrap"><table><thead><tr><th>Item</th><th>Category</th><th>Qty</th></tr></thead><tbody>'+negRows+'</tbody></table></div></div>':"");
   if(dupGroups.length)G("mergeallbtn").onclick=mergeAllDuplicates;
+  wireTeamActivityHandlers(tc);
+  ensureTeamActivityData();
 }
 async function mergeAllDuplicates(){
   var groups=findDuplicateGroups();
