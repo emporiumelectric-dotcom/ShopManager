@@ -2,6 +2,8 @@
 
 ## Open
 
+- [ ] Deploy `shop-write` (adds `op:"record_transfer"`) and smoke-test a real Transfer through the app UI — DB half of the Transfer Stock fix is done and verified live (2026-09-08), this is the last step. See Resolved below for the full writeup once this lands.
+
 - [ ] Deno-based contract tests for the `shop-write` Edge Function (phase 2 of checklist 1.3.7; deferred 2026-08-16).
   - The client-side suite landed 2026-08-16 (`scripts/test-*.cjs` via the `vm` harness, run by `node scripts/run-tests.cjs` and `.github/workflows/ci.yml`). It pins the client half of the wire contract; the server half is untested.
   - Wanted: the decision table in `supabase/functions/shop-write/index.ts` — token path vs PIN path vs `op:"login"` routing; `session_expired` vs `invalid_session` codes; token-path failures never writing `pin_attempts` (the lockout-DoS protection); `TABLE_FIELDS` / `pickFields` / `requiresCanDelete` gating.
@@ -35,11 +37,6 @@
   - The current source routes the mutation calls in these paths through `callWrite`, but this still needs an end-to-end network/Edge Function verification.
   - Confirm anon clients cannot write the affected tables directly. Successful writes alone do not prove whether they used `shop-write` or permissive RLS.
 
-- [ ] `dbTransferStock` (Transfer Stock feature) is broken in production. Found 2026-09-08 while scoping the atomic-transaction work below.
-  - It inserts `transactions` with `type:"transfer"` (`index.html`), but the live `transactions_type_check` CHECK constraint only allows `'in'`/`'out'`. Confirmed on `buzidwccluskdkccidev`: every distinct `type` value in the table is `'in'` or `'out'` — no transfer has ever successfully recorded.
-  - The failure is silent to staff beyond a generic error: `dbTransferStock` catches it and returns `false`, same as any other write error, so this may have gone unnoticed rather than unused.
-  - Also note: `item_locations.item_id` is `bigint` but `items.id` is `uuid` — a pre-existing type mismatch, and `item_locations` has 0 rows in production, consistent with this whole location-breakdown path never having worked.
-  - Fix is either widening the CHECK constraint (if transfers should be a real third type) or reworking the feature; out of scope for the atomic-transaction change below, which deliberately did not touch `dbTransferStock`.
 
 ## Resolved
 

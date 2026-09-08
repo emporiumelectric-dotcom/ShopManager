@@ -355,7 +355,7 @@ var ST={
   modal:null, editItem:null, invQ:"", invCat:"", invLocId:"", invPage:1, invPageSize:50,
   saleReqId:null, siReqId:null,
   siRows:[{id:1,itemId:null,name:"",qty:1}], siSupplier:"", siRef:"", siDate:TODAYKEY, siLocId:null,
-  trRows:[{id:1,itemId:null,name:"",qty:1}], trFromId:null, trToId:null,
+  trRows:[{id:1,itemId:null,name:"",qty:1}], trFromId:null, trToId:null, trReqId:null,
   histQ:"", histFrom:"", histTo:"", loading:false, importStatus:"", switchModalOpen:false, editTxn:null
 };
 
@@ -426,19 +426,24 @@ async function dbGetItemLocQtys(itemId){
   if(error||!data)return {};
   var map={};data.forEach(function(r){map[r.location_id]=Number(r.qty);});return map;
 }
-// Transfer: moves qty between locations, does NOT change items.qty total
-async function dbTransferStock(fromLocId,toLocId,lines){
-  for(var i=0;i<lines.length;i++){
-    var l=lines[i];
-    await dbUpdateLocStock(l.itemId,fromLocId,-l.qty);
-    await dbUpdateLocStock(l.itemId,toLocId,l.qty);
-  }
-  // Log as a transfer transaction (no stock total change)
-  var {data,error}=await callWrite("insert","transactions",{values:{store_id:ST.storeId,type:"transfer",by_user:ST.user.name,txn_date:TODAYKEY,from_location_id:fromLocId,to_location_id:toLocId}});
-  if(error||!data||!data.length){console.error(error);return false;}
-  var txn=data[0];
-  var payload=lines.map(function(l){return{transaction_id:txn.id,item_id:l.itemId,item_name:l.name,qty:l.qty};});
-  await callWrite("insert","transaction_items",{values:payload});
+// Transfer: moves qty between locations, does NOT change items.qty total.
+// One atomic, idempotent call (shop_write_record_transfer,
+// sql/stock-transfer/001) instead of per-line dbUpdateLocStock calls plus
+// separate transactions/transaction_items inserts -- a network failure
+// used to be able to leave stock moved with no logged transaction, or
+// double-move it on retry. requestId lifecycle mirrors
+// dbRecordTransaction's: doTransfer holds it on ST.trReqId across a
+// failed attempt so re-clicking Transfer safely replays.
+async function dbTransferStock(fromLocId,toLocId,lines,requestId){
+  var payload={requestId:requestId,storeId:ST.storeId,fromLocationId:fromLocId,toLocationId:toLocId,
+    txnDate:TODAYKEY,byUser:ST.user.name,
+    lines:lines.map(function(l){return{item_id:l.itemId,item_name:l.name,qty:l.qty};})};
+  var {data,error}=await callWrite("record_transfer",null,payload);
+  if(error||!data){console.error(error);return false;}
+  (data.item_locations||[]).forEach(function(il){
+    if(!ST.itemLocs[il.item_id])ST.itemLocs[il.item_id]={};
+    ST.itemLocs[il.item_id][il.location_id]=Number(il.qty);
+  });
   return true;
 }
 async function fetchUsers(){
@@ -644,7 +649,7 @@ async function doLogin(){
   render();
   await loadStoreData(storeId);
 }
-function logout(){ST.user=null;ST.inv=[];ST.hist=[];ST.cart=[];ST.saleReqId=null;ST.siReqId=null;render();}
+function logout(){ST.user=null;ST.inv=[];ST.hist=[];ST.cart=[];ST.saleReqId=null;ST.siReqId=null;ST.trReqId=null;render();}
 
 function renderMain(){
   var app=G("app");
@@ -1126,7 +1131,7 @@ function renderTransfer(tc){
   G("trfrom").onchange=function(){ST.trFromId=parseInt(this.value)||null;};
   G("trto").onchange=function(){ST.trToId=parseInt(this.value)||null;};
   G("addtrrow").onclick=function(){ST.trRows.push({id:Date.now(),itemId:null,name:"",qty:1});renderTrRows();};
-  G("cleartr").onclick=function(){ST.trRows=[{id:Date.now(),itemId:null,name:"",qty:1}];renderTab();};
+  G("cleartr").onclick=function(){ST.trRows=[{id:Date.now(),itemId:null,name:"",qty:1}];ST.trReqId=null;renderTab();};
   G("savetr").onclick=doTransfer;
   renderTrRows();
 }
@@ -1180,8 +1185,12 @@ async function doTransfer(){
   var btn=G("savetr");btn.disabled=true;btn.textContent="Transferring...";
   var fromLoc=ST.locations.find(function(l){return l.id===ST.trFromId;});
   var toLoc=ST.locations.find(function(l){return l.id===ST.trToId;});
-  var ok=await dbTransferStock(ST.trFromId,ST.trToId,valid);
+  // ponytail: trReqId survives a failed attempt so re-clicking Transfer
+  // replays instead of double-moving stock; cleared below on success.
+  ST.trReqId=ST.trReqId||crypto.randomUUID();
+  var ok=await dbTransferStock(ST.trFromId,ST.trToId,valid,ST.trReqId);
   if(!ok){toast("Transfer failed.",true);btn.disabled=false;btn.textContent="\u8651 Transfer";return;}
+  ST.trReqId=null;
   ST.trRows=[{id:Date.now(),itemId:null,name:"",qty:1}];
   await loadStoreData(ST.storeId);
   toast(valid.length+" item(s) transferred from "+(fromLoc?fromLoc.name:"?")+" to "+(toLoc?toLoc.name:"?")+".");

@@ -107,7 +107,7 @@ Deno.serve(async (req: Request) => {
     return json({ error: "Invalid JSON body" }, 400);
   }
 
-  const { userId, pin, token, op, table, values, match, onConflict, requestId, storeId, type, ref, supplier, txnDate, byUser, lines } = body;
+  const { userId, pin, token, op, table, values, match, onConflict, requestId, storeId, type, ref, supplier, txnDate, byUser, lines, fromLocationId, toLocationId } = body;
   const ip = getClientIp(req);
 
   const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
@@ -277,6 +277,26 @@ Deno.serve(async (req: Request) => {
       p_type: type,
       p_ref: ref ?? null,
       p_supplier: supplier ?? null,
+      p_txn_date: txnDate,
+      p_by_user: byUser,
+      p_lines: lines,
+    });
+    if (error) return json({ error: error.message }, 500);
+    return json({ data });
+  }
+
+  if (op === "record_transfer") {
+    // Atomic+idempotent stock-transfer write (sql/stock-transfer/001).
+    // Same shape as record_txn above, but moves item_locations qty
+    // between two locations instead of applying an items.qty delta.
+    if (!requestId || !storeId || !fromLocationId || !toLocationId || !txnDate || !byUser || !Array.isArray(lines) || !lines.length) {
+      return json({ error: "Missing required fields for record_transfer" }, 400);
+    }
+    const { data, error } = await admin.rpc("shop_write_record_transfer", {
+      p_request_id: requestId,
+      p_store_id: storeId,
+      p_from_location_id: fromLocationId,
+      p_to_location_id: toLocationId,
       p_txn_date: txnDate,
       p_by_user: byUser,
       p_lines: lines,
