@@ -2,7 +2,7 @@
 // validated runtime configuration. Supabase reads and writes remain online.
 importScripts("config-validation.js", "shell-files.js");
 
-const CACHE_NAME = "shopmanager-shell-v3";
+const CACHE_NAME = "shopmanager-shell-v4";
 const CONFIG_CACHE_NAME = "shopmanager-config-v1";
 const CACHE_WHITELIST = [CACHE_NAME, CONFIG_CACHE_NAME];
 const SHELL_FILES = self.EEShellFiles;
@@ -154,7 +154,7 @@ self.addEventListener("fetch", function (event) {
           var shellCache = await caches.open(CACHE_NAME);
           var cached =
             event.request.mode === "navigate"
-              ? await shellCache.match("./index.html")
+              ? await shellCache.match(url.pathname.includes("/catalogue/") ? "./catalogue/index.html" : "./index.html")
               : await shellCache.match(event.request);
           if (cached) {
             return cached;

@@ -696,7 +696,7 @@ function renderNav(){
   var nav=G("navarea");if(!nav)return;
   var isMobile=window.innerWidth<=860;
   var mainDefs=[{t:"dashboard",icon:"&#127968;",label:"Home"},{t:"inventory",icon:"&#128230;",label:"Stock"},{t:"sale",icon:"&#128722;",label:"Sale",badge:cc>0?cc:0},{t:"stockin",icon:"&#128229;",label:"Stock IN"},{t:"transfer",icon:"&#8651;",label:"Transfer"},{t:"history",icon:"&#128203;",label:"History"}];
-  var moreDefs=isOwner?[{t:"import",icon:"&#11014;",label:"Import"},{t:"reports",icon:"&#128202;",label:"Reports"}]:[];
+  var moreDefs=isOwner?[{t:"catalogue",icon:"&#9638;",label:"Catalogue"},{t:"import",icon:"&#11014;",label:"Import"},{t:"reports",icon:"&#128202;",label:"Reports"}]:[];
   var allDefs=mainDefs.concat(moreDefs);
   // On mobile, show main 6 items + a "More" dot-menu if there are owner items
   var showDefs=isMobile&&moreDefs.length?mainDefs:allDefs;
@@ -705,7 +705,7 @@ function renderNav(){
     var btn=document.createElement("button");
     btn.className="navbtn"+(ST.tab===def.t?" active":"");
     btn.innerHTML='<span class="nicon">'+def.icon+'</span><span class="nlabel">'+def.label+'</span>'+(def.badge?"<span class='nbadge'>"+def.badge+"</span>":"");
-    btn.onclick=(function(tab){return function(){ST.tab=tab;renderNav();renderTab();};})(def.t);
+    btn.onclick=(function(tab){return function(){if(tab==="catalogue"){window.location.assign("./catalogue/");return;}ST.tab=tab;renderNav();renderTab();};})(def.t);
     nav.appendChild(btn);
   });
   // Add "More" button on mobile for owner-only tabs
@@ -724,7 +724,7 @@ function renderNav(){
         var item=document.createElement("button");
         item.style.cssText="display:flex;align-items:center;gap:10px;width:100%;padding:11px 14px;border:none;background:none;font-size:14px;font-weight:600;color:var(--ink-text);border-radius:8px;cursor:pointer";
         item.innerHTML=def.icon+" "+def.label;
-        item.onclick=function(){panel.remove();ST.tab=def.t;renderNav();renderTab();};
+        item.onclick=function(){panel.remove();if(def.t==="catalogue"){window.location.assign("./catalogue/");return;}ST.tab=def.t;renderNav();renderTab();};
         panel.appendChild(item);
       });
       document.body.appendChild(panel);
