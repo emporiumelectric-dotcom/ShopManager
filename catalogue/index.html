@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Catalogue · Electric Emporium</title><meta name="robots" content="noindex,nofollow">
+  <link rel="icon" href="../icon-192.png"><link rel="stylesheet" href="styles.css">
+  <script defer src="../vendor/supabase-2.112.2.js"></script>
+  <script defer src="core.js"></script><script defer src="vendor/import-url.js"></script>
+  <script defer src="vendor/images.js"></script><script defer src="app.js"></script>
+</head>
+<body>
+<a class="skip" href="#workspace">Skip to catalogue</a>
+<header class="mast"><a href="../" class="brand"><span class="mark">EE</span><span>Electric Emporium<small>CATALOGUE WORKSPACE</small></span></a><div class="mast-actions"><a href="https://electricemporium.in/products.html" target="_blank" rel="noopener">View website ↗</a><a href="../">Shop Manager</a><button id="signout" hidden>Sign out</button></div></header>
+<p id="notice" class="notice" role="status" aria-live="polite" hidden></p>
+<section id="login" class="login" hidden>
+  <p class="eyebrow">YOUR WEBSITE CATALOGUE</p><h1>Good products.<br>Ready to go live.</h1><p>Import, review and publish from one place. Sign in with your existing website admin account.</p>
+  <form id="login-form"><label>Email<input id="email" type="email" autocomplete="username" value="emporiumelectric@gmail.com" required></label><label>Password<input id="password" type="password" autocomplete="current-password" required></label><button class="primary" type="submit">Sign in</button></form>
+</section>
+<main id="workspace" hidden>
+  <div class="page-head"><div><p class="eyebrow">ELECTRIC EMPORIUM / WEBSITE</p><h1>Product catalogue</h1><p id="summary">Loading your catalogue…</p></div><div class="actions"><button id="import-open">Import products</button><button id="new" class="primary">＋ New product</button></div></div>
+  <nav class="views" aria-label="Catalogue views"><button data-filter="all" class="active">All products <span></span></button><button data-filter="draft">Drafts <span></span></button><button data-filter="attention">Needs attention <span></span></button><button data-filter="changes">Changes to publish <span></span></button><button data-filter="published">Published <span></span></button><button data-filter="unpublished">Unpublished <span></span></button></nav>
+  <div class="toolbar"><input id="search" type="search" placeholder="Search name, brand or model…" aria-label="Search catalogue"><select id="category-filter" aria-label="Filter by category"><option value="">All categories</option></select><button id="refresh">Refresh</button></div>
+  <div id="bulk" class="bulk" hidden><strong id="selected-count"></strong><select id="bulk-category" aria-label="Set category for selected products"><option value="">Set category…</option></select><button id="bulk-publish" class="primary">Publish selected</button><button id="bulk-unpublish">Unpublish selected</button><button id="clear-selection">Clear</button></div>
+  <div class="table-wrap"><table><thead><tr><th><input id="select-all" type="checkbox" aria-label="Select all visible products"></th><th>Product</th><th>Category</th><th>Selling price</th><th>Availability</th><th>Website</th><th>Review</th></tr></thead><tbody id="rows"></tbody></table><div id="empty" class="empty" hidden>No products match this view.</div></div>
+  <footer class="table-footer"><span id="row-count"></span><span>Draft edits stay private until you publish.</span></footer>
+</main>
+<dialog id="editor" class="editor">
+  <form id="product-form">
+    <div class="editor-head"><div><p class="eyebrow" id="editor-state">DRAFT</p><h2 id="editor-title">New product</h2></div><button type="button" id="editor-close" aria-label="Close editor">✕</button></div>
+    <div class="editor-body">
+      <div id="checks" class="checks"></div>
+      <div class="fields"><label>Product name<input name="name" maxlength="250"></label><label>Brand<input name="brand" maxlength="120"></label><label>Model / SKU<input name="model" maxlength="150"></label><label>Category<select name="category"><option value="">Choose category…</option></select></label><label>Colour / finish<input name="colour" maxlength="100"></label><label>Size / capacity<input name="size" placeholder="1200 mm, 15 L, 1.5 sq mm…" maxlength="100"></label></div>
+      <div class="section-title"><h3>Pricing & availability</h3><span id="discount"></span></div>
+      <div class="fields"><label>Selling price (₹)<input name="price" inputmode="decimal" placeholder="Blank = Call for price"></label><label>MRP (₹)<input name="mrp" inputmode="decimal" placeholder="Optional"></label></div>
+      <label class="check"><input name="priceReviewed" type="checkbox"> I have checked the selling price, or chosen “Call for price”.</label><label class="check"><input name="inStock" type="checkbox"> Available in our shop</label>
+      <label>Description<textarea name="description" rows="4" maxlength="12000"></textarea></label>
+      <label>Specifications <span class="hint">One per line: Wattage: 28 W</span><textarea id="specs" rows="4" placeholder="Wattage: 28 W&#10;Warranty: 2 years"></textarea></label>
+      <section><div class="section-title"><h3>Catalogue photos</h3><label class="file-button">Add photos<input id="photos-input" type="file" accept="image/*" multiple hidden></label></div><p class="hint">The first photo is the cover. Images are resized and saved with your draft.</p><div id="photos" class="photos"></div><div class="inline"><input id="image-url" type="url" placeholder="Or paste an image URL" aria-label="Image URL"><button id="image-add" type="button">Add image</button></div></section>
+      <section id="candidates-section" hidden><div class="section-title"><h3>Images found on the source page</h3></div><p class="hint">Choose only images of this product. Click “Keep” to save a photo.</p><div id="candidates" class="photos"></div></section>
+      <section id="choices-section" hidden><label>Source page variant<select id="choices"><option value="">Choose a colour / model…</option></select></label><p class="hint">Check the exact variant before selecting its photos and price.</p></section>
+      <details><summary>Website variant buttons</summary><p class="hint">One per line: type | value | price | in stock (yes/no) | linked website ID (optional)</p><textarea id="variants" rows="3" aria-label="Website variants" placeholder="colour | White | 2999 | yes"></textarea></details>
+      <details><summary>Link shop stock</summary><p class="hint">Link the exact stock item(s), then use “Read linked stock” to update this draft’s availability. Publish to apply it to the website.</p><div class="inline"><input id="stock-query" placeholder="Find the shop’s stock item…" aria-label="Search stock"><button id="stock-search" type="button">Search</button></div><div id="stock-results"></div><div id="stock-links"></div><button id="stock-sync" type="button">Read linked stock</button></details>
+      <label>Source product link<input name="sourceUrl" type="url" placeholder="https://…"></label>
+      <div id="editor-note" class="hint" role="status"></div>
+    </div>
+    <div class="editor-foot"><button type="button" id="preview">Preview</button><button type="button" id="unpublish">Unpublish</button><a id="live-link" target="_blank" rel="noopener" hidden>View live ↗</a><span class="spacer"></span><button type="submit" id="save">Save draft</button><button type="button" id="publish" class="primary">Publish</button></div>
+  </form>
+</dialog>
+<dialog id="importer" class="importer"><div class="dialog-head"><div><p class="eyebrow">BUILD YOUR CATALOGUE</p><h2>Import products</h2></div><button id="import-close" aria-label="Close importer">✕</button></div><div class="dialog-body">
+  <label>Product links<textarea id="urls" rows="5" placeholder="Paste one manufacturer or supplier product URL per line"></textarea></label><p class="hint">Links are saved to your queue first. You can close this page and resume later. Every imported product starts as a private draft.</p><div class="actions"><button id="queue-add" class="primary">Add links & import</button><button id="queue-resume">Resume / retry queue</button><button id="queue-pause">Pause after this product</button></div>
+  <div class="import-options"><section><h3>Supplier spreadsheet</h3><p>Use the template for names, prices, specifications and image links.</p><div class="actions"><button id="template">Download CSV template</button><label class="file-button">Upload Excel / CSV<input id="csv" type="file" accept=".xlsx,.xls,.csv,text/csv" hidden></label></div><p class="hint">Excel (.xlsx / .xls) and CSV supported. The first sheet is imported.</p></section><section><h3>Existing EE Lens catalogue</h3><p>Bring your catalogue records into website drafts. Only customer catalogue photos are offered.</p><button id="lens-import">Import EE Lens products</button></section></div>
+  <p id="import-progress" role="status" aria-live="polite"></p><div id="queue-list"></div>
+</div></dialog>
+<dialog id="preview-dialog" class="preview-dialog"><div class="dialog-head"><h2>Website preview</h2><button id="preview-close" aria-label="Close preview">✕</button></div><div id="preview-content"></div><p class="preview-note">Draft preview · Nothing is published by opening this preview.</p></dialog>
+<div id="working" class="working" role="status" hidden>Saving…</div>
+</body></html>
+
+

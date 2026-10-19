@@ -178,12 +178,12 @@ async function run() {
 
   assert.deepStrictEqual(
     (await caches.keys()).sort(),
-    ["shopmanager-config-v1", "shopmanager-shell-v3"],
-    "activate must retain only the v3 shell and config caches"
+    ["shopmanager-config-v1", "shopmanager-shell-v4"],
+    "activate must retain only the v4 shell and config caches"
   );
   assert(await configCache.match(configRequest), "upgrade erased cached config");
 
-  const shellCache = await caches.open("shopmanager-shell-v3");
+  const shellCache = await caches.open("shopmanager-shell-v4");
   assert(
     shellCache.added.includes("./vendor/supabase-2.112.2.js"),
     "vendored supabase-js missing from atomic shell install"
@@ -202,6 +202,8 @@ async function run() {
   );
 
   const freshBody = configBody({ generatedAt: "2026-08-09T12:01:00.000Z" });
+  const catalogueOffline = await dispatchFetch(getRequest("/catalogue/", "navigate"));
+  assert.strictEqual(await responseText(catalogueOffline), "shell:./catalogue/index.html", "offline catalogue navigation must not fall back to the stock app");
   networkFetch = async function () {
     return new Response(freshBody, {
       status: 200,
