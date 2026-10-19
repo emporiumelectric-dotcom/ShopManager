@@ -67,8 +67,10 @@ function cleanData(value,draftId,previous){
   p.variants=(value.variants||[]).slice(0,60).map(v=>({variant_type:String(v.variant_type||'').slice(0,80),variant_value:String(v.variant_value||'').slice(0,120),price:String(v.price||'').slice(0,30),in_stock:v.in_stock!==false,linked_product_id:/^\d+$/.test(String(v.linked_product_id||''))?String(v.linked_product_id):null})).filter(v=>v.variant_type&&v.variant_value);
   return p;
 }
-async function getDraft(value){const d=check(await admin.from('catalogue_drafts').select('*').eq('id',id(value)).maybeSingle());if(!d)fail('Product not found.',404);return d;}
-async function allRows(table,query=q=>q){let rows=[];for(let from=0;from<20000;from+=500){const page=check(await query(admin.from(table).select('*')).range(from,from+499));rows.push(...page);if(page.length<500)return rows;}fail('The catalogue is too large to load in one request.');}
+function activeDrafts(rows){return rows.filter(d=>!d.data?.mergedInto);}
+function sameLensProduct(d,p){return !d.data?.mergedInto&&norm(d.data.brand)===norm(p.brand)&&norm(d.data.name)===norm(p.name)&&norm(d.data.colour)===norm(p.colour)&&norm(d.data.size).replace(/\s+/g,'')===norm(p.size).replace(/\s+/g,'');}
+async function getDraft(value){const d=check(await admin.from('catalogue_drafts').select('*').eq('id',id(value)).maybeSingle());if(!d)fail('Product not found.',404);if(d.data?.mergedInto)fail('This draft was merged into an existing product. Refresh the catalogue.',409);return d;}
+async function allRows(table,query=q=>q){let rows=[];for(let from=0;from<20000;from+=500){const page=check(await query(admin.from(table).select('*')).range(from,from+499));rows.push(...page);if(page.length<500)return table==='catalogue_drafts'?activeDrafts(rows):rows;}fail('The catalogue is too large to load in one request.');}
 let opsConfig;
 async function opsAuth(){
   if(!opsConfig){const r=await fetch('https://manager.electricemporium.in/config.json',{signal:AbortSignal.timeout(15000)});if(!r.ok)fail('Stock connection is unavailable.',502);opsConfig=await r.json();}
@@ -107,10 +109,11 @@ async function handle(req){
     }
     if(b.action==='save'){
       id(b.id);const old=check(await admin.from('catalogue_drafts').select('data').eq('id',b.id).maybeSingle());
+      if(old?.data?.mergedInto)fail('This draft was merged into an existing product. Refresh the catalogue.',409);
       const p=cleanData(b.data,b.id,old?.data);const key=p.brand&&(p.model||p.name)?[p.brand,p.model||p.name,p.colour,p.size].map(norm).join('|'):null;
       if(!old&&p.sourceUrl){
         const matches=check(await admin.from('catalogue_drafts').select('*').eq('data->>sourceUrl',p.sourceUrl).limit(100));
-        const match=matches.find(d=>norm(d.data.model)===norm(p.model)&&norm(d.data.colour)===norm(p.colour)&&norm(d.data.size)===norm(p.size));
+        const match=matches.find(d=>!d.data?.mergedInto&&norm(d.data.model)===norm(p.model)&&norm(d.data.colour)===norm(p.colour)&&norm(d.data.size)===norm(p.size));
         if(match)return json({draft:match,duplicate:true});
       }
       return json(check(await admin.rpc('catalogue_save',{p_id:b.id,p_revision:b.revision,p_data:p,p_key:key})));
@@ -152,9 +155,9 @@ async function handle(req){
     if(b.action==='lens')return json({products:await ops('products','select=*&deleted_at=is.null&order=id','ee_lens'),photos:await ops('product_photos','select=*&role=eq.catalogue&order=sort_order','ee_lens')});
     if(b.action==='lensImport'){
       if(!/^\d+$/.test(String(b.lensId)))fail('Invalid EE Lens product.');
-      const existing=check(await admin.from('catalogue_drafts').select('*').eq('data->>lensId',String(b.lensId)).limit(1));if(existing.length)return json({draft:existing[0],duplicate:true});
+      const existing=check(await admin.from('catalogue_drafts').select('*').eq('data->>lensId',String(b.lensId)).limit(1));if(existing.length)return json({draft:existing[0].data?.mergedInto?await getDraft(existing[0].data.mergedInto):existing[0],duplicate:true});
       const [p]=await ops('products',`select=*&deleted_at=is.null&id=eq.${b.lensId}`,'ee_lens');if(!p)fail('EE Lens product not found.',404);
-      const same=(await allRows('catalogue_drafts')).find(d=>norm(d.data.brand)===norm(p.brand)&&norm(d.data.name)===norm(p.name));if(same)return json({draft:same,duplicate:true});
+      const same=(await allRows('catalogue_drafts')).find(d=>sameLensProduct(d,p));if(same)return json({draft:same,duplicate:true});
       const images=await ops('product_photos',`select=storage_path&product_id=eq.${b.lensId}&role=eq.catalogue&order=sort_order`,'ee_lens');
       const draftId=id(b.id),photos=[];
       for(const image of images.slice(0,20)){
