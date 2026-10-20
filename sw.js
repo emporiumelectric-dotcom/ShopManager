@@ -2,7 +2,7 @@
 // validated runtime configuration. Supabase reads and writes remain online.
 importScripts("config-validation.js", "shell-files.js");
 
-const CACHE_NAME = "shopmanager-shell-v5";
+const CACHE_NAME = "shopmanager-shell-v6";
 const CONFIG_CACHE_NAME = "shopmanager-config-v1";
 const CACHE_WHITELIST = [CACHE_NAME, CONFIG_CACHE_NAME];
 const SHELL_FILES = self.EEShellFiles;

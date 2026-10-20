@@ -1,0 +1,20 @@
+<!doctype html><meta charset="utf-8"><title>Catalogue importer checks</title>
+<h1>Catalogue importer checks</h1><pre id="result">Running…</pre>
+<script src="../catalogue/vendor/import-url.js"></script>
+<script>
+(async()=>{
+  const checks=[],check=(name,pass)=>{if(!pass)throw Error(name);checks.push('PASS '+name);};
+  const gallery=Array.from({length:5},(_,i)=>({full:'https://havells.com/media/zen-'+i+'.jpg',position:i+1,type:'image'}));
+  const init={'[data-gallery-role=gallery-placeholder]':{'mage/gallery/gallery':{data:gallery}}};
+  const sample='<h1>ZEN Dry Iron</h1><form data-product-sku="GHGDIEKB110"></form><script type="text/x-magento-init">'+JSON.stringify(init)+'<\/script><section id="featuresSection"><div class="feature-row"><div><h3>1100 W heating</h3><p>Fast warm-up.</p></div></div></section><section id="technicalSpecsSection"><div class="specs-row"><div class="data-label">Voltage</div><div class="data-value">240 V</div></div></section><img src="https://havells.com/media/unrelated-iron.jpg">';
+  const p=extractProduct(sample,'https://havells.com/zen.html');
+  check('Only the five main-gallery photos',p.images.length===5&&p.images.every(x=>x.includes('/zen-')));
+  check('Feature title and explanation',p.features[0]?.text==='Fast warm-up.');
+  check('Technical specification value',p.specs.Voltage==='240 V');check('Manufacturer and SKU',p.brand==='Havells'&&p.model==='GHGDIEKB110');
+  const shop=extractProduct('<h1>Right iron</h1><script type="application/ld+json">'+JSON.stringify({'@type':'Product',name:'SEO name',image:['https://example.com/iron.jpg?v=1','https://example.com/iron.jpg?v=2']})+'<\/script><img src="https://example.com/other-iron.jpg">','https://example.com/iron');
+  check('Deduplicated product data; unrelated page images excluded',shop.images.length===1&&shop.name==='Right iron');
+  check('No global image fallback',extractProduct('<h1>Iron</h1><img src="https://example.com/other.jpg">','https://example.com/iron').images.length===0);
+  const response=await fetch('/__source.html');if(response.ok){const actual=extractProduct(await response.text(),'https://havells.com/home-appliances/appliances/irons/zen-dry-iron-ghgdiekb110.html');check('Official ZEN page: 5 photos',actual.images.length===5);check('Official ZEN page: 5 features',actual.features.length===5);check('Official ZEN page: 19 specs',Object.keys(actual.specs).length===19);checks.push(JSON.stringify(actual,null,2));}
+  document.getElementById('result').textContent=checks.join('\n');
+})().catch(e=>document.getElementById('result').textContent='FAIL '+e.message);
+</script>

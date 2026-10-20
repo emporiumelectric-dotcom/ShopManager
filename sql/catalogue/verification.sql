@@ -3,8 +3,10 @@ do $test$
 declare draft uuid:=gen_random_uuid(); payload jsonb; result jsonb; pid bigint; bad boolean:=false;
 begin
 payload:=jsonb_build_object('name','__catalogue_transaction_test__','brand','Test','category','Fans','price','100','priceReviewed',true,'inStock',true,'photos',jsonb_build_array(jsonb_build_object('url','https://example.com/test.jpg')),'specs','{}'::jsonb,'variants',jsonb_build_array(jsonb_build_object('variant_type','colour','variant_value','White','in_stock',true)));
+payload:=payload||jsonb_build_object('description','Test description','features',jsonb_build_array(jsonb_build_object('title','Heating','text','1100 W')),'specs',jsonb_build_object('Voltage','240 V'));
 perform public.catalogue_save(draft,0,payload,'__test__'||draft::text);
 result:=public.catalogue_publish(draft,1,'["https://example.com/test.jpg"]'::jsonb); pid:=(result->>'website_id')::bigint;
+if not (select "Spec" like E'Description\nTest description%Features\n• Heating — 1100 W%Technical specifications%Voltage: 240 V%' from public.products where id=pid) then raise exception 'product sections missing'; end if;
 if (select count(*) from public.product_images where product_id=pid)<>1 then raise exception 'image insert failed'; end if;
 if (select count(*) from public.product_variants where product_id=pid)<>1 then raise exception 'variant insert failed'; end if;
 result:=public.catalogue_publish(draft,1,'["https://example.com/test.jpg"]'::jsonb);
