@@ -127,7 +127,7 @@ function jsonLdProducts(doc) {
       if (Array.isArray(node['@graph'])) queue.push(...node['@graph']);
       const type = node['@type'];
       const types = Array.isArray(type) ? type : [type];
-      if (types.some((t) => String(t).toLowerCase() === 'product')) found.push(node);
+      if (types.some((t) => ['product','productgroup'].includes(String(t).toLowerCase()))) found.push(node);
     }
   }
   return found;
@@ -792,7 +792,11 @@ function extractProduct(html, finalUrl) {
     sizeSweepMm: sizeMatch ? Number.parseInt(sizeMatch[1], 10) : null,
     specs,
     images,
-    variants: []
+    variants: (Array.isArray(product?.hasVariant)?product.hasVariant:[]).map(v=>{
+      const ownImages=[];collectImages(v.image,ownImages);
+      const size=firstString(v.size).match(/(\d{3,4})\s*mm/i);
+      return {name:firstString(v.name)||name,sku:firstString(v.sku)||firstString(v.model),label:[firstString(v.color),firstString(v.size)].filter(Boolean).join(' · ')||firstString(v.name),colour:firstString(v.color),sizeSweepMm:size?Number(size[1]):null,images:ownImages.map(url=>absolute(url,finalUrl)).filter(Boolean)};
+    })
   };
 }
 

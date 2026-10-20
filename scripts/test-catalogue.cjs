@@ -18,7 +18,7 @@ assert.throws(()=>C.parseCSV('Unknown\nExample'));
 const candidate=C.fromCandidate({name:'Fan',brand:'H',category:'Fans',priceMinor:299900,images:['https://example.com/photo.jpg']});
 assert.equal(candidate.price,'2999');assert.equal(candidate.priceReviewed,false);assert.deepEqual(candidate.photos,[]);
 const context=vm.createContext({createClient:()=>({auth:{getUser:async()=>({data:{user:null},error:Error('Invalid session')})}}),Deno:{env:{get:()=>''},resolveDns:async()=>['127.0.0.1'],serve:()=>{}},Response,Request,URL,AbortSignal,TextDecoder,Uint8Array,crypto:require('node:crypto').webcrypto});
-const edge=fs.readFileSync(path.join(__dirname,'../supabase/functions/catalogue-manager/index.js'),'utf8').replace(/^import .*\n/,'');vm.runInContext(edge,context);
+const edge=fs.readFileSync(path.join(__dirname,'../supabase/functions/catalogue-manager/index.js'),'utf8').replace(/^import [^\n]*\r?\n/,'');vm.runInContext(edge,context);
 for(const ip of ['127.0.0.1','10.0.0.1','169.254.169.254','172.20.1.2','192.168.1.1','100.64.1.2','::1','::ffff:127.0.0.1','fe80::1','fc00::1','2002:7f00:1::'])assert.equal(vm.runInContext(`publicAddress(${JSON.stringify(ip)})`,context),false,ip);
 assert.equal(vm.runInContext("publicAddress('8.8.8.8')",context),true);
 const draftId='00000000-0000-4000-8000-000000000001';
@@ -30,7 +30,7 @@ assert.equal(vm.runInContext("cleanData({price:'₹2,999.00',photos:[]},draftId,
   for(const url of ['http://127.0.0.1/a','http://[::1]/','file:///etc/passwd','https://example.com:8000/','https://example.com/'])await assert.rejects(vm.runInContext(`publicUrl(${JSON.stringify(url)})`,context));
   const noAuth=await vm.runInContext("handle(new Request('https://example.com',{method:'POST',body:'{}'}))",context);assert.equal(noAuth.status,401);
   const invalid=await vm.runInContext("handle(new Request('https://example.com',{method:'POST',headers:{Authorization:'Bearer invalid'},body:'{}'}))",context);assert.equal(invalid.status,401);
-  const combined=['core.js','vendor/import-url.js','vendor/images.js','app.js'].map(f=>fs.readFileSync(path.join(__dirname,'../catalogue',f),'utf8')).join('\n');new vm.Script(combined);
+  const combined=['core.js','vendor/import-url.js','vendor/images.js','app.js','batch.js'].map(f=>fs.readFileSync(path.join(__dirname,'../catalogue',f),'utf8')).join('\n');new vm.Script(combined);
   console.log('Catalogue rules, CSV, variant review, private-image validation, SSRF and auth checks passed.');
 })().catch(e=>{console.error(e);process.exitCode=1;});
 

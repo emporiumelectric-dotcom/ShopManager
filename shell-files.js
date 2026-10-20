@@ -30,6 +30,7 @@
       "./catalogue/tokens.css",
       "./catalogue/core.js",
       "./catalogue/app.js",
+      "./catalogue/batch.js",
       "./catalogue/vendor/import-url.js",
       "./catalogue/vendor/images.js",
       "./catalogue/vendor/xlsx-0.20.3.min.js"

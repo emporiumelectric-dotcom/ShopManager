@@ -6,7 +6,7 @@
   <link rel="icon" href="../icon-192.png"><link rel="stylesheet" href="styles.css">
   <script defer src="../vendor/supabase-2.112.2.js"></script>
   <script defer src="core.js"></script><script defer src="vendor/import-url.js"></script>
-  <script defer src="vendor/images.js"></script><script defer src="app.js"></script>
+  <script defer src="vendor/images.js"></script><script defer src="app.js"></script><script defer src="batch.js"></script>
 </head>
 <body>
 <a class="skip" href="#workspace">Skip to catalogue</a>
@@ -17,7 +17,7 @@
   <form id="login-form"><label>Email<input id="email" type="email" autocomplete="username" value="emporiumelectric@gmail.com" required></label><label>Password<input id="password" type="password" autocomplete="current-password" required></label><button class="primary" type="submit">Sign in</button></form>
 </section>
 <main id="workspace" hidden>
-  <div class="page-head"><div><p class="eyebrow">ELECTRIC EMPORIUM / WEBSITE</p><h1>Product catalogue</h1><p id="summary">Loading your catalogue…</p></div><div class="actions"><button id="import-open">Import products</button><button id="new" class="primary">＋ New product</button></div></div>
+  <div class="page-head"><div><p class="eyebrow">ELECTRIC EMPORIUM / WEBSITE</p><h1>Product catalogue</h1><p id="summary">Loading your catalogue…</p></div><div class="actions"><button id="batch-open" class="primary">Add to both</button><button id="import-open">Other imports</button><button id="new">＋ New product</button></div></div>
   <nav class="views" aria-label="Catalogue views"><button data-filter="all" class="active">All products <span></span></button><button data-filter="draft">Drafts <span></span></button><button data-filter="attention">Needs attention <span></span></button><button data-filter="changes">Changes to publish <span></span></button><button data-filter="published">Published <span></span></button><button data-filter="unpublished">Unpublished <span></span></button></nav>
   <div class="toolbar"><input id="search" type="search" placeholder="Search name, brand or model…" aria-label="Search catalogue"><select id="category-filter" aria-label="Filter by category"><option value="">All categories</option></select><button id="refresh">Refresh</button></div>
   <div id="bulk" class="bulk" hidden><strong id="selected-count"></strong><select id="bulk-category" aria-label="Set category for selected products"><option value="">Set category…</option></select><button id="bulk-publish" class="primary">Publish selected</button><button id="bulk-unpublish">Unpublish selected</button><button id="clear-selection">Clear</button></div>
@@ -53,6 +53,17 @@
 </div></dialog>
 <dialog id="preview-dialog" class="preview-dialog"><div class="dialog-head"><h2>Website preview</h2><button id="preview-close" aria-label="Close preview">✕</button></div><div id="preview-content"></div><p class="preview-note">Draft preview · Nothing is published by opening this preview.</p></dialog>
 <div id="working" class="working" role="status" hidden>Saving…</div>
+<dialog id="batch-dialog" class="batch-dialog" aria-labelledby="batch-title">
+  <div class="batch-head"><div><p class="eyebrow">EE LENS + YOUR WEBSITE</p><h2 id="batch-title">Add products once. Publish to both.</h2><p class="hint">Paste links, check the rows together, then publish the selected products.</p><p id="batch-connection" class="hint" role="status"></p></div><button id="batch-close" aria-label="Close batch review">Close</button></div>
+  <div id="batch-body" class="batch-body">
+    <div class="batch-intake"><label>Product links<textarea id="batch-urls" rows="3" placeholder="Paste your 5 product links here, one per line"></textarea></label><div><button id="batch-fetch" class="primary">Fetch products</button><p class="hint">New products start with Call for price. Existing prices are kept.</p><label>Continue a saved batch<select id="batch-resume"><option value="">Choose a batch…</option></select></label></div></div>
+    <div class="batch-toolbar"><strong id="batch-summary" role="status" aria-live="polite">Your products will appear here.</strong><div class="actions"><button id="batch-select-ready">Select ready rows</button><button id="batch-call-price">Call for price for selected</button><select id="batch-category" aria-label="Category for selected rows"><option value="">Set category…</option></select><button id="batch-retry">Retry failed links</button></div></div>
+    <p id="batch-progress" role="status" aria-live="polite"></p>
+    <div class="batch-table-wrap"><table class="batch-table"><thead><tr><th><input id="batch-select-all" type="checkbox" aria-label="Select all batch products"></th><th>Product & variant</th><th>Catalogue photos</th><th>Price & availability</th><th>Details & status</th></tr></thead><tbody id="batch-rows"></tbody></table></div>
+    <div id="batch-empty" class="batch-empty"><span>01 / Paste your links</span><h3>Five products. One review.</h3><p>Names, variants and photos appear together. Uncheck any row to keep it on hold.</p></div>
+  </div>
+  <div class="batch-foot"><label class="check"><input id="batch-approved" type="checkbox"> I have checked the selected products, variants, photos, prices and availability.</label><div class="actions"><button id="batch-save">Save batch drafts</button><button id="batch-publish" class="primary" disabled>Publish selected to both</button></div></div>
+</dialog>
 </body></html>
 
 

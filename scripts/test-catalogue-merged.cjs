@@ -6,7 +6,7 @@ let reads=0;
 const query={select(){return this;},eq(){return this;},async maybeSingle(){reads++;return {data:merged,error:null};}};
 const admin={auth:{getUser:async()=>({data:{user:{id:owner}},error:null})},from:()=>query};
 const context=vm.createContext({createClient:()=>admin,Deno:{env:{get:()=>''},serve:()=>{}},Response,Request,URL,AbortSignal,TextDecoder,Uint8Array,crypto:require('node:crypto').webcrypto});
-vm.runInContext(fs.readFileSync(path.join(__dirname,'../supabase/functions/catalogue-manager/index.js'),'utf8').replace(/^import .*\n/,''),context);
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../supabase/functions/catalogue-manager/index.js'),'utf8').replace(/^import [^\n]*\r?\n/,''),context);
 assert.equal(vm.runInContext("activeDrafts([{data:{}},{data:{mergedInto:'target'}}]).length",context),1);
 assert.equal(vm.runInContext("sameLensProduct({data:{brand:'Havells',name:'Cera',colour:'Champagne',size:'1200 mm'}},{brand:'Havells',name:'Cera',colour:'Mist',size:'1200mm'})",context),false);
 assert.equal(vm.runInContext("sameLensProduct({data:{brand:'Havells',name:'Cera',colour:'Mist',size:'1200 mm'}},{brand:'Havells',name:'Cera',colour:'Mist',size:'1200mm'})",context),true);
