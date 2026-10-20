@@ -186,6 +186,9 @@ function extractSpecs(doc) {
     if (!(key in specs)) specs[key] = value;
   };
 
+  for (const row of doc.querySelectorAll('#technicalSpecsSection .specs-row, #productSpecs .specs-row')) {
+    add(textOf(row.querySelector('.data-label')),textOf(row.querySelector('.data-value')));
+  }
   for (const row of doc.querySelectorAll('tr')) {
     const cells = row.querySelectorAll('th, td');
     if (cells.length === 2) add(textOf(cells[0]), textOf(cells[1]));
@@ -241,6 +244,7 @@ function extractMrpMinor(doc, product) {
     ? spec.find((s) => /list|strikethrough|rrp|msrp/i.test(String(s?.priceType || s?.['@type'] || '')))
     : spec;
   return firstNumber(
+    doc.querySelector('[data-price-type="oldPrice"]')?.getAttribute('data-price-amount'),
     offer?.highPrice,
     list?.price,
     product?.mrp,
@@ -578,7 +582,15 @@ function magentoGalleryImages(html, finalUrl) {
   const swatchBlock = initBlocks.find(
     (b) => b.includes('[data-role=swatch-options]') && b.includes('Magento_Swatches/js/swatch-renderer')
   );
-  if (!swatchBlock) return [];
+  if (!swatchBlock) {
+    for (const block of initBlocks) {
+      try {
+        const data=JSON.parse(block)['[data-gallery-role=gallery-placeholder]']?.['mage/gallery/gallery']?.data;
+        if (Array.isArray(data)) return data.filter(x=>!x.is_hidden&&(!x.type||x.type==='image')).sort((a,b)=>Number(a.position||0)-Number(b.position||0)).map(x=>x.full||x.img).filter(Boolean);
+      } catch { /* Ignore malformed inert product data. */ }
+    }
+    return [];
+  }
 
   let config;
   try {
@@ -663,109 +675,37 @@ function extractProduct(html, finalUrl) {
 
   // og:title and <title> are SEO headlines ("Buy Genuine … Online In India"),
   // not product names, so they are not used as a fallback.
-  const name = firstString(product?.name) || textOf(doc.querySelector('h1')) || '';
+  const name = textOf(doc.querySelector('h1')) || firstString(product?.name) || '';
 
   // og:site_name is the shop, never the manufacturer.
-  const brand = firstString(product?.brand) || '';
+  const brand = /(^|\.)havells\.com$/i.test(new URL(finalUrl).hostname)?'Havells':firstString(product?.brand) || '';
 
-  const description = cleanDescription(
-    firstString(product?.description) ||
-      meta(doc, 'og:description', 'description', 'twitter:description') || '',
-    name
-  );
+  const rawDescription=firstString(product?.description)||meta(doc,'og:description','description','twitter:description')||'';
+  const description=cleanDescription(textOf(new DOMParser().parseFromString(rawDescription,'text/html').body),name);
 
-  const model = firstString(product?.model) || firstString(product?.mpn) || firstString(product?.sku) || '';
+  const model = firstString(product?.model) || firstString(product?.mpn) || firstString(product?.sku) || (pageProductSku(doc,html,product)||'').toUpperCase();
   const colour = firstString(product?.color) || '';
   const category = firstString(product?.category) || '';
 
-  // magentoGalleryImages goes first and is the real, structured answer on
-  // a *configurable* Magento product (one sold with swatches -- colour,
-  // size, ...): it already knows which photos are this exact variant's
-  // own, in the shop's own stated order, pushed first so the generic sweep
-  // below (which still runs, and still helps on any other site) can never
-  // crowd it out of the MAX_IMAGE_CANDIDATES cap. It has nothing to read on
-  // a *simple* product with no swatches at all -- confirmed on a second
-  // real Havells page ("Florette UL BLDC Smartsense Ceiling Fan"): no
-  // [data-role=swatch-options] block exists there, so it correctly returns
-  // [] rather than guessing, exactly as designed -- but that page still hit
-  // the exact same underlying problem the generic sweep has never solved:
-  // its "14 found" were ALL a completely different fan model, because nothing
-  // in the sweep could tell "this product's own photo" apart from "a
-  // different product's photo, shown elsewhere on this same page" (a "you
-  // may also like" carousel, most likely) any better than it originally
-  // could for the tracking pixel and promo banners.
-  //
-  // pageSku (below) is what actually closes that gap, generally, not just
-  // for Magento: a real product photo's filename is reliably derived from
-  // its own SKU on every platform checked so far, so a different product
-  // shown alongside it carries a different SKU in its own filename instead
-  // -- unlike a CSS class (reused site-wide for every product's thumbnail;
-  // tried and rejected here already for exactly that reason), a SKU is a
-  // direct identity match, not a fuzzy visual-role guess. Applied only to
-  // the generic sweep's own candidates below (genericSweepImages), never to
-  // magentoGalleryImages' output, which has already resolved the exact
-  // right coloured variant via its own JSON and can legitimately carry a
-  // different (but related) SKU suffix than the page's own parent SKU.
-  //
-  // Real findings, not hypothetical, both from real Havells product pages:
-  // "14 found" once included a Facebook conversion pixel and five
-  // site-wide sub-brand/promo banners (Havells Studio, Lloyd, Crabtree,
-  // REO, "One App Advantage"), none of them catchable by a filename-
-  // keyword check alone -- the pixel is caught above by its own
-  // width="1" height="1" attributes (and, belt-and-suspenders, its
-  // facebook.com hostname), the banners by their shared /media/wysiwyg/
-  // path (Magento's CMS-block asset folder, never real catalogue photos,
-  // which live under /media/catalog/product/). A site with the same
-  // "which photos on this page are THIS product's" problem but no SKU
-  // stated anywhere reliable has no fix here -- rendering the page in a
-  // real browser is the only way to tell that apart in full generality,
-  // and a materially heavier tool than this file.
-  const pageSku = pageProductSku(doc, html, product);
-
-  const rawImages = [];
-  rawImages.push(...magentoGalleryImages(html, finalUrl));
-  collectImages(product?.image, rawImages);
-  const og = meta(doc, 'og:image', 'twitter:image');
-  if (og) rawImages.push(og);
-
-  const genericSweepImages = [];
-  for (const img of doc.querySelectorAll('img')) {
-    // A 1x1 image is the textbook tracking-pixel shape (Facebook, Google
-    // Analytics, and most ad networks all size their pixel this way) --
-    // real product photos are never this size, so this is safe to drop
-    // outright rather than lean on IMAGE_NOISE/TRACKING_PIXEL_HOSTS
-    // recognising the hosting domain by name.
-    if (img.getAttribute('width') === '1' && img.getAttribute('height') === '1') continue;
-    const src = img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
-    if (src) genericSweepImages.push(src);
-    const srcset = img.getAttribute('srcset');
-    if (srcset) {
-      const best = srcset.split(',').map((s) => s.trim().split(/\s+/)[0]).filter(Boolean).pop();
-      if (best) genericSweepImages.push(best);
+  const gallery=magentoGalleryImages(html,finalUrl),rawImages=[];
+  if(gallery.length)rawImages.push(...gallery);
+  else {
+    collectImages(product?.image,rawImages);
+    // Explicit main-product galleries only. Related-product images are excluded.
+    for(const img of doc.querySelectorAll('[data-gallery-role="gallery-placeholder"] img, media-gallery img, .product__media-list img, .product-single__photos img')) {
+      const src=img.getAttribute('data-src')||img.getAttribute('src');if(src)rawImages.push(src);
     }
+    if(!rawImages.length){const cover=meta(doc,'og:image','twitter:image');if(cover)rawImages.push(cover);}
   }
-  // Prefer generic-sweep candidates whose own filename carries this page's
-  // own SKU, when one is known -- falls back to the full, unfiltered sweep
-  // when the SKU is unknown, or when nothing in the sweep happens to
-  // match it (a shop that names files by internal numeric id instead,
-  // say), so this can only ever narrow the result, never discard every
-  // candidate outright.
-  const skuMatchedImages = pageSku ? genericSweepImages.filter((raw) => raw.toLowerCase().includes(pageSku)) : [];
-  rawImages.push(...(skuMatchedImages.length ? skuMatchedImages : genericSweepImages));
-
-  const seen = new Set();
-  const images = [];
-  for (const raw of rawImages) {
-    const url = absolute(raw, finalUrl);
-    if (!url || seen.has(url)) continue;
-    if (/\.svg(\?|$)/i.test(url)) continue;
-    if (IMAGE_NOISE.test(url)) continue;
-    if (isTrackingPixelUrl(url)) continue;
-    seen.add(url);
-    images.push(url);
-    if (images.length >= MAX_IMAGE_CANDIDATES) break;
+  const seen=new Set(),images=[];
+  for(const raw of rawImages){
+    const url=absolute(raw,finalUrl);if(!url||/\.svg(\?|$)/i.test(url)||IMAGE_NOISE.test(url)||isTrackingPixelUrl(url))continue;
+    const identity=new URL(url);identity.protocol='https:';identity.searchParams.delete('width');identity.searchParams.delete('height');identity.searchParams.delete('v');
+    if(seen.has(identity.href))continue;seen.add(identity.href);images.push(url);
+    if(images.length>=MAX_IMAGE_CANDIDATES)break;
   }
-
+  const features=[...doc.querySelectorAll('#featuresSection .feature-row h3')].map(h=>({title:textOf(h),text:[...h.parentElement.querySelectorAll('p')].map(textOf).join(' ')})).filter(f=>f.title);
+  if(!features.length)for(const li of doc.querySelectorAll('.product.attribute.overview li, [itemprop="description"] li')){const title=textOf(li);if(title)features.push({title,text:''});}
   const specs = { ...extractSpecs(doc) };
   // A pattern match wins over the raw structured-data value: guessCategory
   // only ever returns a name from the shop's own standard list, while the
@@ -785,8 +725,9 @@ function extractProduct(html, finalUrl) {
     name,
     model,
     category: guessed,
-    colour,
+    colour: colour || specs.Color || specs.Colour || '',
     description,
+    features: features.slice(0,30),
     priceMinor: extractPriceMinor(doc, product),
     mrpMinor: extractMrpMinor(doc, product),
     sizeSweepMm: sizeMatch ? Number.parseInt(sizeMatch[1], 10) : null,

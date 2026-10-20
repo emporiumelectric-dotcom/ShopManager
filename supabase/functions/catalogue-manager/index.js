@@ -37,6 +37,7 @@ async function download(raw,image=false){
   for(let redirect=0;redirect<5;redirect++){
     const response=await fetch(u,{redirect:'manual',signal:AbortSignal.timeout(25000),headers:{'User-Agent':'ElectricEmporium-Catalogue/1.0','Accept':image?'image/*':'text/html,application/xhtml+xml','Accept-Language':'en-IN,en;q=0.9'}});
     if([301,302,303,307,308].includes(response.status)){const location=response.headers.get('location');await response.body?.cancel();if(!location)fail('The source returned an invalid redirect.');u=await publicUrl(new URL(location,u).href);continue;}
+    if(response.status===429){await response.body?.cancel();fail('This website is limiting automatic requests (429). Retry later, or use the exact product link from its manufacturer or another supplier.',422);}
     if(!response.ok){await response.body?.cancel();fail(`The source website returned ${response.status}. You can enter the product manually.`,422);}
     const type=(response.headers.get('content-type')||'').split(';')[0];
     if(image?!['image/jpeg','image/png','image/webp','image/avif','image/gif'].includes(type):!['text/html','application/xhtml+xml'].includes(type)){await response.body?.cancel();fail(image?'This URL is not a supported image.':'This URL is not a product webpage.');}
@@ -61,6 +62,7 @@ function cleanData(value,draftId,previous){
   if(uuid.test(value.batchId||''))p.batchId=value.batchId;
   p.batchPhotoUrls=(value.batchPhotoUrls||[]).filter(x=>typeof x==='string'&&/^https?:\/\//i.test(x)).slice(0,20);
   if(Number.isInteger(value.batchVariantIndex))p.batchVariantIndex=value.batchVariantIndex;
+  p.features=(Array.isArray(value.features)?value.features:[]).slice(0,30).map(f=>({title:String(f.title||'').trim().slice(0,300),text:String(f.text||'').trim().slice(0,2000)})).filter(f=>f.title);
   p.specs={};for(const [k,v] of Object.entries(value.specs||{}).slice(0,80))if(k.trim())p.specs[k.slice(0,100)]=String(v).slice(0,2000);
   p.photos=(value.photos||[]).slice(0,20).map(photo=>{
     if(photo.path&&new RegExp('^'+draftId+'/[a-f0-9]{64}\\.jpg$').test(photo.path))return {path:photo.path};
@@ -116,10 +118,12 @@ async function sendToLens(payload,token){
   if(!response.ok)fail(result.error||'EE Lens is unavailable. Retry this row.',502);
   return result;
 }
-async function publishBoth(d,revision,token){
+async function publishBoth(d,revision,token,destination='both'){
   readyToPublish(d,revision);
+  if(destination==='lens'&&d.data.lensSyncedRevision===revision)return d;
   if(d.publication==='published'&&d.published_revision===revision&&d.data.lensSyncedRevision===revision)return d;
-  const images=await publishImages(d);
+  // Lens-only publication does not expose private draft photos on the website.
+  const images=destination==='lens'?await Promise.all(d.data.photos.map(async p=>p.url||check(await admin.storage.from('catalogue-drafts').createSignedUrl(p.path,600)).signedUrl)):await publishImages(d);
   if(d.data.lensSyncedRevision!==revision){
     const result=await sendToLens({id:d.id,revision,data:d.data,lensId:d.data.lensId||null,images},token);
     if(!result.lensId)fail('EE Lens could not be saved. Retry this row.',502);
@@ -128,6 +132,7 @@ async function publishBoth(d,revision,token){
     if(!updated)fail('EE Lens saved this version, but the website draft changed. Reload before publishing.',409);
     d=updated;
   }
+  if(destination==='lens')return d;
   try{return check(await admin.rpc('catalogue_publish',{p_id:d.id,p_revision:revision,p_images:images}));}
   catch(e){fail('Saved to EE Lens; website publication is pending. Retry this row. '+e.message,e.status||400);}
 }
@@ -172,6 +177,7 @@ async function handle(req){
       const signed=paths.length?check(await admin.storage.from('catalogue-drafts').createSignedUrls(paths,3600)):[];
       return json({photos:d.data.photos.map(p=>({...p,preview:p.url||signed.find(s=>s.path===p.path)?.signedUrl}))});
     }
+    if(b.action==='publishLens')return json({draft:await publishBoth(await getDraft(b.id),b.revision,token,'lens')});
     if(b.action==='publishBoth')return json({draft:await publishBoth(await getDraft(b.id),b.revision,token)});
     if(b.action==='publish'){
       const d=await getDraft(b.id);readyToPublish(d,b.revision);

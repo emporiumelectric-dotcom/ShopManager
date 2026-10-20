@@ -32,11 +32,11 @@ const fixture=String.raw`(() => {
     if(b.action==='fetchImage')return new Response(Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jh1sAAAAASUVORK5CYII='),c=>c.charCodeAt(0)),{headers:{'Content-Type':'image/png'}});
     if(b.action==='upload')return ok({path:b.id+'/'+b.hash+'.jpg'});
     if(b.action==='sign')return ok({photos:state.records.find(d=>d.id===b.id).data.photos.map(p=>({...p,preview:location.origin+'/__photo.jpg'}))});
-    if(b.action==='publishBoth'){
+    if(['publishBoth','publish','publishLens'].includes(b.action)){
       const d=state.records.find(d=>d.id===b.id);if(d.revision!==b.revision)return error('Stale revision');
-      if(d.data.lensSyncedRevision!==d.revision){state.lens++;d.data.lensId=String(100+state.lens);d.data.lensSyncedRevision=d.revision;}
-      if(d.data.model==='DEMO-3'&&!state.partial){state.partial=true;return error('Saved to EE Lens; website publication is pending. Retry this row.');}
-      if(d.published_revision!==d.revision){state.website++;d.publication='published';d.published_revision=d.revision;d.website_id=200+state.website;}return ok({draft:d});
+      if(b.action!=='publish'&&d.data.lensSyncedRevision!==d.revision){state.lens++;d.data.lensId=String(100+state.lens);d.data.lensSyncedRevision=d.revision;}
+      if(b.action==='publishBoth'&&d.data.model==='DEMO-3'&&!state.partial){state.partial=true;return error('Saved to EE Lens; website publication is pending. Retry this row.');}
+      if(b.action!=='publishLens'&&d.published_revision!==d.revision){state.website++;d.publication='published';d.published_revision=d.revision;d.website_id=200+state.website;}return ok({draft:d});
     }
     return error('Unhandled fixture action: '+b.action);
   };
@@ -44,6 +44,12 @@ const fixture=String.raw`(() => {
 })();`;
 http.createServer((req,res)=>{
   const url=new URL(req.url,'http://127.0.0.1');
+  if(url.pathname==='/__source.html'&&process.env.CATALOGUE_SOURCE_FIXTURE){res.setHeader('Content-Type','text/plain');return res.end(fs.readFileSync(process.env.CATALOGUE_SOURCE_FIXTURE));}
+  if(url.pathname.startsWith('/__website/')&&process.env.CATALOGUE_WEBSITE_FIXTURE){
+    const base=path.resolve(process.env.CATALOGUE_WEBSITE_FIXTURE),file=path.resolve(base,'.'+url.pathname.slice('/__website'.length));
+    if(!file.startsWith(base+path.sep)){res.writeHead(403);return res.end();}
+    try{let body=fs.readFileSync(file);if(file.endsWith('product-detail.html'))body=body.toString().replace('<head>','<head><script src="/scripts/product-page-fixture.js"></script>');res.setHeader('Content-Type',path.extname(file)==='.html'?'text/html':path.extname(file)==='.js'?'text/javascript':'text/plain');return res.end(body);}catch{res.writeHead(404);return res.end();}
+  }
   if(url.pathname==='/__fixture.js'){res.setHeader('Content-Type','text/javascript');return res.end(fixture);}
   if(url.pathname==='/__photo.jpg'){res.setHeader('Content-Type','image/svg+xml');return res.end('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 100"><rect width="120" height="100" fill="#f6f5f2"/><g fill="#777" transform="translate(60 50)"><ellipse rx="42" ry="7"/><ellipse rx="42" ry="7" transform="rotate(60)"/><ellipse rx="42" ry="7" transform="rotate(120)"/><circle r="12" fill="#bbb"/></g></svg>');}
   const file=path.resolve(root,'.'+decodeURIComponent(url.pathname)+(url.pathname.endsWith('/')?'index.html':''));

@@ -3,8 +3,12 @@
   const cacheKey='ee-catalogue-batch-review';
   let batchId='',rows=[],busy=false,changed=false;
   const stable=value=>JSON.stringify(value,(_,v)=>v&&typeof v==='object'&&!Array.isArray(v)?Object.fromEntries(Object.entries(v).sort(([a],[b])=>a.localeCompare(b))):v);
-  const finished=row=>row.draft?.publication==='published'&&row.draft.published_revision===row.draft.revision&&row.draft.data.lensSyncedRevision===row.draft.revision&&!row.dirty;
-  function remember(){try{localStorage.setItem(cacheKey,JSON.stringify({batchId,rows}));}catch{/* Saving to the server remains available. */}}
+  const destination=()=>$('batch-destination').value;
+  const destinationName=()=>({both:'both',website:'website',lens:'EE Lens'})[destination()];
+  const finished=row=>!row.dirty&&!!row.draft&&(destination()==='lens'?row.draft.data.lensSyncedRevision===row.draft.revision:destination()==='website'?row.draft.publication==='published'&&row.draft.published_revision===row.draft.revision:row.draft.publication==='published'&&row.draft.published_revision===row.draft.revision&&row.draft.data.lensSyncedRevision===row.draft.revision);
+  const featureText=p=>(p.features||[]).map(f=>f.title+(f.text?' | '+f.text:'')).join('\n');
+  const parseFeatures=text=>text.split('\n').filter(s=>s.trim()).map(line=>{const at=line.indexOf('|');return {title:(at<0?line:line.slice(0,at)).trim(),text:at<0?'':line.slice(at+1).trim()};});
+  function remember(){try{localStorage.setItem(cacheKey,JSON.stringify({batchId,rows,destination:destination()}));}catch{/* Saving to the server remains available. */}}
   function pending(row){
     if(!row.data)return [row.error||'Could not read this link'];
     const p=row.data,issues=Catalogue.issues({...p,priceReviewed:true,photos:[...(p.photos||[]),...(p.batchPhotoUrls||[])]});
@@ -16,8 +20,8 @@
     const selectedRows=rows.filter(r=>r.selected&&!finished(r));
     const ready=selectedRows.filter(r=>!pending(r).length);
     const done=rows.filter(finished).length;
-    $('batch-summary').textContent=rows.length?`${rows.length} products · ${ready.length} ready to publish · ${done} published to both`:'Your products will appear here.';
-    $('batch-publish').textContent=`Publish ${ready.length||'selected'} to both`;
+    $('batch-summary').textContent=rows.length?`${rows.length} products · ${ready.length} ready to publish · ${done} completed for ${destinationName()}`:'Your products will appear here.';
+    $('batch-publish').textContent=`${destination()==='lens'?'Save':'Publish'} ${ready.length||'selected'} to ${destinationName()}`;
     $('batch-publish').disabled=busy||!ready.length||ready.length!==selectedRows.length||!$('batch-approved').checked;
     $('batch-select-all').checked=rows.some(r=>r.data&&!finished(r))&&rows.filter(r=>r.data&&!finished(r)).every(r=>r.selected);
     $('batch-empty').hidden=!!rows.length;
@@ -28,7 +32,7 @@
     field.oninput=()=>{row.data[key]=field.value;edited(row);updateStatus(row);};wrap.append(field);return wrap;
   }
   function checkbox(label,checked,callback){const wrap=el('label',null,'check'),box=el('input');box.type='checkbox';box.checked=checked;box.onchange=()=>callback(box.checked);wrap.append(box,document.createTextNode(label));return wrap;}
-  function status(row){return row.error|| (finished(row)?'Published to both':row.progress|| (pending(row).length?'Needs '+pending(row).join(', '):row.existing&&!row.selected?'Existing product · select to update':row.selected?'Ready for batch review':'On hold'));}
+  function status(row){return row.error|| (finished(row)?'Saved to '+destinationName():row.progress|| (pending(row).length?'Needs '+pending(row).join(', '):row.existing&&!row.selected?'Existing product · select to update':row.selected?'Ready for batch review':'On hold'));}
   function updateStatus(row){const node=document.getElementById('batch-status-'+row.id);if(node){node.textContent=status(row);node.className='batch-row-status '+(row.error?'error':finished(row)?'done':'');}}
   function renderPhotos(row,target){
     const p=row.data;target.replaceChildren();
@@ -61,14 +65,25 @@
       }
       const identity=el('div',null,'batch-pair');identity.append(input(row,'colour','Colour'),input(row,'size','Size / capacity'));product.append(identity);
       const source=el('a','Source product ↗','hint');source.href=row.url||p.sourceUrl;source.target='_blank';source.rel='noopener';product.append(source);
+      const refreshDetails=el('details'),refreshTitle=el('summary','Change source / fetch again'),refresh=el('button','Refresh from source');refresh.type='button';
+      refresh.onclick=()=>task(async()=>{
+        const {html,finalUrl}=await api('fetchPage',{url:p.sourceUrl});const c=extractProduct(html,finalUrl);c.specs={...c.specs,...readSpecsFromText(c)};
+        if(!c.name)throw Error('This source did not return a product. Your existing details were kept.');
+        const fresh=Catalogue.fromCandidate(c);
+        row.data={...p,...fresh,size:fresh.size||p.size,category:fresh.category||p.category,price:p.price,inStock:p.inStock,stockIds:p.stockIds,variants:p.variants,batchId,photos:[],batchPhotoUrls:(c.images||[]).slice(0,1),priceReviewed:false};
+        row.url=finalUrl;row.selected=true;edited(row);$('batch-progress').textContent='Source refreshed. Check the new details and photos, then save the draft or publish to your chosen destination.';
+      });
+      refreshDetails.append(refreshTitle,input(row,'sourceUrl','Product source link','url'),el('p','Replaces fetched details and photos. Your selling price and availability are kept.','hint'),refresh);refreshDetails.querySelectorAll('input,button').forEach(control=>control.dataset.keepEnabled='true');product.append(refreshDetails);
       renderPhotos(row,photos);
       const priceField=input(row,'price','Selling price (₹)');priceField.querySelector('input').placeholder='Blank = Call for price';pricing.append(priceField,el('p','Blank means Call for price.','hint'));
       const catLabel=el('label','Category'),category=el('select');category.setAttribute('aria-label',`Category — ${p.name}`);category.add(new Option('Choose category…',''));Catalogue.categories.forEach(c=>category.add(new Option(c,c)));category.value=p.category||'';category.onchange=()=>{p.category=category.value;edited(row);updateStatus(row);};catLabel.append(category);pricing.append(catLabel);
       pricing.append(checkbox('Available in our shop',!!p.inStock,value=>{p.inStock=value;edited(row);}));
       const description=el('label','Description'),text=el('textarea');text.rows=3;text.value=p.description||'';text.setAttribute('aria-label',`Description — ${p.name}`);text.oninput=()=>{p.description=text.value;edited(row);};description.append(text);details.append(description);
+      const features=el('label','Features'),featureInput=el('textarea');featureInput.rows=4;featureInput.value=featureText(p);featureInput.placeholder='One per line: Feature title | Explanation';featureInput.setAttribute('aria-label',`Features — ${p.name}`);featureInput.oninput=()=>{p.features=parseFeatures(featureInput.value);edited(row);};features.append(featureInput);details.append(features);
+      const previewButton=el('button','Preview product');previewButton.type='button';previewButton.dataset.keepEnabled='true';previewButton.onclick=()=>previewProduct(p);details.append(previewButton);
       const specs=el('details'),specTitle=el('summary','Specifications'),specText=el('textarea');specText.rows=5;specText.value=Object.entries(p.specs||{}).map(([k,v])=>`${k}: ${v}`).join('\n');specText.setAttribute('aria-label',`Specifications — ${p.name}`);specText.oninput=()=>{p.specs={};for(const line of specText.value.split('\n')){const at=line.indexOf(':');if(at>0)p.specs[line.slice(0,at).trim()]=line.slice(at+1).trim();}edited(row);};specs.append(specTitle,specText);details.append(specs);
       const statusNode=el('p',status(row),'batch-row-status');statusNode.id='batch-status-'+row.id;details.append(statusNode);
-      if(finished(row)){for(const cell of [product,photos,pricing,details])cell.querySelectorAll('input,select,textarea,button').forEach(control=>control.disabled=true);}
+      if(finished(row)){for(const cell of [product,photos,pricing,details])cell.querySelectorAll('input,select,textarea,button').forEach(control=>control.disabled=!control.dataset.keepEnabled);}
       tr.append(product,photos,pricing,details);$('batch-rows').append(tr);updateStatus(row);
     }
     summary();
@@ -82,9 +97,9 @@
     await signPhotos();
   }
   async function task(fn){
-    if(busy||working)return;busy=true;$('batch-body').inert=true;$('batch-close').disabled=true;$('batch-save').disabled=true;$('batch-publish').disabled=true;
+    if(busy||working)return;busy=true;$('batch-body').inert=true;$('batch-destination').disabled=true;$('batch-close').disabled=true;$('batch-save').disabled=true;$('batch-publish').disabled=true;
     try{await fn();}catch(e){$('batch-progress').textContent=e.message;}
-    finally{busy=false;$('batch-body').inert=false;$('batch-close').disabled=false;$('batch-save').disabled=false;remember();draw();resumeOptions();}
+    finally{busy=false;$('batch-body').inert=false;$('batch-destination').disabled=false;$('batch-close').disabled=false;$('batch-save').disabled=false;remember();draw();resumeOptions();}
   }
   async function fetchRows(targets){
     for(const row of targets){
@@ -126,8 +141,8 @@
       try{
         $('batch-progress').textContent=`Publishing ${chosen.indexOf(row)+1} of ${chosen.length}: ${row.data.name}`;row.error='';
         await preparePhotos(row);row.data.priceReviewed=true;await saveRow(row);
-        row.progress='Saving to EE Lens and publishing website…';updateStatus(row);
-        const result=await api('publishBoth',{id:row.id,revision:row.draft.revision});row.draft=clone(result.draft);row.data=clone(result.draft.data);row.selected=false;row.dirty=false;row.progress='';replaceDraft(result.draft);done++;
+        row.progress='Saving to '+destinationName()+'…';updateStatus(row);
+        const result=await api(({both:'publishBoth',website:'publish',lens:'publishLens'})[destination()],{id:row.id,revision:row.draft.revision});row.draft=clone(result.draft);row.data=clone(result.draft.data);row.selected=false;row.dirty=false;row.progress='';replaceDraft(result.draft);done++;
       }catch(e){row.error=e.message;row.progress='';
         // A network timeout can happen after either destination committed. Re-read
         // the receipt so retries keep the same revision and destination identities.
@@ -136,9 +151,9 @@
       remember();draw();
     }
     changed=rows.some(r=>r.dirty);$('batch-approved').checked=false;
-    $('batch-progress').textContent=`${done} product(s) published to both. ${rows.filter(r=>r.error).length} need attention. Unselected rows stay on hold.`;
+    $('batch-progress').textContent=`${done} product(s) saved to ${destinationName()}. ${rows.filter(r=>r.error).length} need attention. Unselected rows stay on hold.`;
   }
-  $('batch-open').onclick=async()=>{resumeOptions();try{const saved=JSON.parse(localStorage.getItem(cacheKey)||'null');if(!rows.length&&saved?.batchId){batchId=saved.batchId;rows=saved.rows||[];for(const row of rows){const fresh=drafts.find(d=>d.id===row.id);if(fresh){if(row.draft?.revision!==fresh.revision){row.data=clone(fresh.data);row.dirty=false;}row.draft=clone(fresh);}}}}catch{}draw();$('batch-dialog').showModal();$('batch-connection').textContent='Checking both connections…';try{const result=await api('checkBoth');$('batch-connection').textContent=result.ready?'Connected to EE Lens and website.':'EE Lens connection needs attention.';await signPhotos();}catch(e){$('batch-connection').textContent=e.message;}};
+  $('batch-open').onclick=async()=>{resumeOptions();try{const saved=JSON.parse(localStorage.getItem(cacheKey)||'null');if(!rows.length&&saved?.batchId){batchId=saved.batchId;rows=saved.rows||[];if(['both','website','lens'].includes(saved.destination))$('batch-destination').value=saved.destination;for(const row of rows){const fresh=drafts.find(d=>d.id===row.id);if(fresh){if(row.draft?.revision!==fresh.revision){row.data=clone(fresh.data);row.dirty=false;}row.draft=clone(fresh);}}}}catch{}draw();$('batch-dialog').showModal();$('batch-connection').textContent='Checking both connections…';try{const result=await api('checkBoth');$('batch-connection').textContent=result.ready?'Connected to EE Lens and website.':'EE Lens connection needs attention.';await signPhotos();}catch(e){$('batch-connection').textContent=e.message;}};
   $('batch-close').onclick=()=>{remember();$('batch-dialog').close();};
   $('batch-dialog').addEventListener('cancel',e=>{if(busy)e.preventDefault();else remember();});
   $('batch-fetch').onclick=()=>task(async()=>{
@@ -152,6 +167,7 @@
   $('batch-resume').onchange=()=>task(async()=>{if(!$('batch-resume').value)return;if(rows.some(r=>r.dirty)){await saveRows();if(rows.some(r=>r.dirty))throw Error('Save the current changes first.');}await restore($('batch-resume').value);});
   $('batch-retry').onclick=()=>task(()=>fetchRows(rows.filter(r=>!r.data)));
   $('batch-save').onclick=()=>task(saveRows);$('batch-publish').onclick=()=>task(publish);
+  $('batch-destination').onchange=()=>{$('batch-approved').checked=false;rows.forEach(r=>{r.selected=!!r.data&&!finished(r)&&!r.existing;});$('batch-progress').textContent='Destination: '+destinationName()+'. Review your selected rows before saving.';remember();draw();};
   $('batch-approved').onchange=summary;
   $('batch-select-all').onchange=e=>{rows.filter(r=>r.data&&!finished(r)).forEach(r=>r.selected=e.target.checked);$('batch-approved').checked=false;remember();draw();};
   $('batch-select-ready').onclick=()=>{rows.forEach(r=>r.selected=!!r.data&&!finished(r)&&!pending(r).length);$('batch-approved').checked=false;remember();draw();};

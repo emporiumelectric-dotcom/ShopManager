@@ -20,11 +20,26 @@ context.draft=clone(draft);
   assert.equal(lensCalls,1,'retry skips completed Lens write');assert.equal(publishCalls,2);
   context.draft=clone(draft);await vm.runInContext("publishBoth(draft,3,'owner-session')",context);
   assert.equal(publishCalls,2,'full replay is a no-op');
-  context.id=id;const clean=vm.runInContext("cleanData({lensId:'999',lensSyncedRevision:999,photos:[]},id,{lensId:'42',lensSyncedRevision:3})",context);
+  context.draftId=id;const clean=vm.runInContext("cleanData({lensId:'999',lensSyncedRevision:999,photos:[]},draftId,{lensId:'42',lensSyncedRevision:3})",context);
   assert.equal(clean.lensId,'42');assert.equal(clean.lensSyncedRevision,3);
+  let signed=0;
+  admin.storage={from(bucket){assert.equal(bucket,'catalogue-drafts','Lens-only uses private draft storage');return {async createSignedUrl(photo,ttl){signed++;assert.equal(ttl,600);return {data:{signedUrl:'https://dnmzzckeuctnkqbphwdg.supabase.co/storage/v1/object/sign/catalogue-drafts/'+photo+'?token=test'}};}};}};
+  draft={id,revision:4,publication:'draft',data:{name:'Iron',brand:'Havells',category:'Appliances',price:'',priceReviewed:true,photos:[{path:id+'/'+ 'a'.repeat(64)+'.jpg'}]}};
+  context.draft=clone(draft);await vm.runInContext("publishBoth(draft,4,'owner-session','lens')",context);
+  assert.equal(signed,1);assert.equal(lensCalls,2);assert.equal(publishCalls,2,'Lens-only must never call website publication');assert.equal(draft.publication,'draft');
+  context.draft=clone(draft);await vm.runInContext("publishBoth(draft,4,'owner-session','lens')",context);assert.equal(lensCalls,2,'Lens-only replay is a no-op');
+  draft.data.photos=[{url:'https://dnmzzckeuctnkqbphwdg.supabase.co/storage/v1/object/public/product-photos/a.jpg'}];writeData={};
+  const websiteResult=await vm.runInContext("handle(new Request('https://example.com',{method:'POST',headers:{authorization:'Bearer owner-session'},body:JSON.stringify({action:'publish',id:draftId,revision:4})}))",context);
+  assert.equal(websiteResult.status,200,await websiteResult.text());assert.equal(lensCalls,2,'Website-only must never call EE Lens');assert.equal(publishCalls,3);
+  const featureData=vm.runInContext("cleanData({features:[{title:'Heat',text:'1100 W'}, {title:'',text:'skip'}],photos:[]},draftId,{})",context);
+  assert.deepEqual(clone(featureData.features),[{title:'Heat',text:'1100 W'}]);
   let authUser=null,writes=0;
   const receiver=vm.createContext({createClient:()=>({auth:{getUser:async()=>({data:{user:authUser}})},storage:{from(){writes++;throw Error('Unexpected write');}}}),Deno:{env:{get:()=>''},serve:()=>{}},Response,Request,URL,AbortSignal,Uint8Array,TextEncoder,crypto});
   vm.runInContext(source('supabase-ops/functions/catalogue-receive/index.js'),receiver);
+  receiver.draftId=id;receiver.privateUrl='https://dnmzzckeuctnkqbphwdg.supabase.co/storage/v1/object/sign/catalogue-drafts/'+id+'/'+ 'a'.repeat(64)+'.jpg?token=test';
+  assert.equal(String(vm.runInContext('imageUrl(privateUrl,draftId)',receiver)),receiver.privateUrl);
+  assert.throws(()=>vm.runInContext("imageUrl(privateUrl,'00000000-0000-4000-8000-000000000002')",receiver));
+  assert.throws(()=>vm.runInContext("imageUrl(privateUrl+'&redirect=evil',draftId)",receiver));
   for(const url of ['https://evil.example/a.jpg','https://dnmzzckeuctnkqbphwdg.supabase.co/other/a.jpg','http://dnmzzckeuctnkqbphwdg.supabase.co/storage/v1/object/public/product-photos/a.jpg']){
     receiver.url=url;assert.throws(()=>vm.runInContext('imageUrl(url)',receiver));
   }
