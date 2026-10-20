@@ -14,6 +14,12 @@ begin
   insert into ee_lens.product_photos(product_id,role,storage_path) values(pid,'shop',d::text||'/shop.jpg');
   perform ee_lens.catalogue_receive(d,2,null,p||'{"name":"Updated test name"}'::jsonb,photos);
   if (select count(*) from ee_lens.product_photos where product_id=pid)<>2 then raise exception 'Photo replay or shop photo preservation failed'; end if;
+  insert into ee_lens.product_photos(product_id,role,storage_path) values(pid,'catalogue','manual-lens/keep.jpg');
+  photos:=jsonb_build_array(jsonb_build_object('client_id',gen_random_uuid(),'storage_path',d::text||'/replacement.jpg','checksum','replacement'));
+  perform ee_lens.catalogue_receive(d,3,null,p,photos);
+  if exists(select 1 from ee_lens.product_photos where product_id=pid and storage_path=d::text||'/test.jpg') then raise exception 'Deselected managed photo remained'; end if;
+  if (select count(*) from ee_lens.product_photos where product_id=pid)<>3 then raise exception 'Shop or manually added Lens photo was lost'; end if;
+  if (select cover_photo_id from ee_lens.products where id=pid)<>(select id from ee_lens.product_photos where product_id=pid and storage_path=d::text||'/replacement.jpg') then raise exception 'Cover did not move to selected photo'; end if;
   begin
     perform ee_lens.catalogue_receive(d,1,null,p,photos);
     raise exception 'Expected stale revision rejection';
