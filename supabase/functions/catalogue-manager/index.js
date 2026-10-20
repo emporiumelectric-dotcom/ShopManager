@@ -55,6 +55,12 @@ function cleanData(value,draftId,previous){
   const p={};for(const field of ['name','brand','category','model','colour','size','description','price','mrp','sourceUrl','lensId'])p[field]=String(value[field]??'').trim().slice(0,field==='description'?12000:2000);
   for(const field of ['price','mrp']){p[field]=p[field].replace(/^(₹|Rs\.?|INR)\s*/i,'').replace(/,/g,'');if(p[field]&&!/^\d+(\.\d{1,2})?$/.test(p[field]))fail('Prices must be positive numbers or blank.');if(p[field]&&Number(p[field])<=0)fail('Prices must be positive numbers or blank.');}
   p.priceReviewed=value.priceReviewed===true;p.variantReviewed=value.variantReviewed===true;p.inStock=value.inStock===true;
+  // Links and sync receipts are server-owned, even when a draft is edited.
+  p.lensId=previous?.lensId||'';
+  if(previous?.lensSyncedRevision)p.lensSyncedRevision=previous.lensSyncedRevision;
+  if(uuid.test(value.batchId||''))p.batchId=value.batchId;
+  p.batchPhotoUrls=(value.batchPhotoUrls||[]).filter(x=>typeof x==='string'&&/^https?:\/\//i.test(x)).slice(0,20);
+  if(Number.isInteger(value.batchVariantIndex))p.batchVariantIndex=value.batchVariantIndex;
   p.specs={};for(const [k,v] of Object.entries(value.specs||{}).slice(0,80))if(k.trim())p.specs[k.slice(0,100)]=String(v).slice(0,2000);
   p.photos=(value.photos||[]).slice(0,20).map(photo=>{
     if(photo.path&&new RegExp('^'+draftId+'/[a-f0-9]{64}\\.jpg$').test(photo.path))return {path:photo.path};
@@ -91,6 +97,40 @@ async function ops(table,query,schema='public'){
   const r=await fetch(`${base}/rest/v1/${table}?${query}`,{signal:AbortSignal.timeout(20000),headers:{apikey:key,Authorization:`Bearer ${key}`,'Accept-Profile':schema}});
   if(!r.ok)fail('Could not read the shop catalogue.',502);return r.json();
 }
+function readyToPublish(d,revision){
+  if(d.revision!==revision)fail('This product changed. Reload before publishing.',409);
+  if(!d.data.name?.trim()||!d.data.brand?.trim()||!d.data.category?.trim()||!d.data.priceReviewed||!d.data.photos?.length||(d.data.choices?.length&&!d.data.variantReviewed))fail('Review the product details, price, variant and photos before publishing.');
+}
+async function publishImages(d){
+  const images=[];for(const p of d.data.photos){
+    if(p.url){images.push(p.url);continue;}
+    const file=check(await admin.storage.from('catalogue-drafts').download(p.path));
+    const target=`catalogue/${p.path}`;check(await admin.storage.from('product-photos').upload(target,file,{contentType:'image/jpeg',upsert:true}));
+    images.push(admin.storage.from('product-photos').getPublicUrl(target).data.publicUrl);
+  }return images;
+}
+async function sendToLens(payload,token){
+  const {base,key}=await opsAuth();
+  const response=await fetch(`${base}/functions/v1/catalogue-receive`,{method:'POST',signal:AbortSignal.timeout(75000),headers:{apikey:key,Authorization:`Bearer ${key}`,'x-website-token':token,'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  const result=await response.json().catch(()=>({}));
+  if(!response.ok)fail(result.error||'EE Lens is unavailable. Retry this row.',502);
+  return result;
+}
+async function publishBoth(d,revision,token){
+  readyToPublish(d,revision);
+  if(d.publication==='published'&&d.published_revision===revision&&d.data.lensSyncedRevision===revision)return d;
+  const images=await publishImages(d);
+  if(d.data.lensSyncedRevision!==revision){
+    const result=await sendToLens({id:d.id,revision,data:d.data,lensId:d.data.lensId||null,images},token);
+    if(!result.lensId)fail('EE Lens could not be saved. Retry this row.',502);
+    const linked={...d.data,lensId:String(result.lensId),lensSyncedRevision:revision};
+    const updated=check(await admin.from('catalogue_drafts').update({data:linked}).eq('id',d.id).eq('revision',revision).select().maybeSingle());
+    if(!updated)fail('EE Lens saved this version, but the website draft changed. Reload before publishing.',409);
+    d=updated;
+  }
+  try{return check(await admin.rpc('catalogue_publish',{p_id:d.id,p_revision:revision,p_images:images}));}
+  catch(e){fail('Saved to EE Lens; website publication is pending. Retry this row. '+e.message,e.status||400);}
+}
 async function handle(req){
   if(req.method==='OPTIONS')return new Response('ok',{headers:cors});
   if(req.method!=='POST')return json({error:'Method not allowed'},405);
@@ -107,6 +147,7 @@ async function handle(req){
       for(let i=0;i<paths.length;i+=100)covers.push(...check(await admin.storage.from('catalogue-drafts').createSignedUrls(paths.slice(i,i+100),3600)));
       return json({drafts,covers,jobs:check(await admin.from('catalogue_imports').select('*').neq('state','complete').order('created_at').limit(1000))});
     }
+    if(b.action==='checkBoth')return json(await sendToLens({action:'check'},token));
     if(b.action==='save'){
       id(b.id);const old=check(await admin.from('catalogue_drafts').select('data').eq('id',b.id).maybeSingle());
       if(old?.data?.mergedInto)fail('This draft was merged into an existing product. Refresh the catalogue.',409);
@@ -131,15 +172,10 @@ async function handle(req){
       const signed=paths.length?check(await admin.storage.from('catalogue-drafts').createSignedUrls(paths,3600)):[];
       return json({photos:d.data.photos.map(p=>({...p,preview:p.url||signed.find(s=>s.path===p.path)?.signedUrl}))});
     }
+    if(b.action==='publishBoth')return json({draft:await publishBoth(await getDraft(b.id),b.revision,token)});
     if(b.action==='publish'){
-      const d=await getDraft(b.id);if(d.revision!==b.revision)fail('This product changed. Reload before publishing.',409);
-      if(!d.data.name?.trim()||!d.data.brand?.trim()||!d.data.category?.trim()||!d.data.priceReviewed||!d.data.photos?.length||(d.data.choices?.length&&!d.data.variantReviewed))fail('Review the product details, price, variant and photos before publishing.');
-      const images=[];for(const p of d.data.photos){
-        if(p.url){images.push(p.url);continue;}
-        const file=check(await admin.storage.from('catalogue-drafts').download(p.path));
-        const target=`catalogue/${p.path}`;check(await admin.storage.from('product-photos').upload(target,file,{contentType:'image/jpeg',upsert:true}));
-        images.push(admin.storage.from('product-photos').getPublicUrl(target).data.publicUrl);
-      }
+      const d=await getDraft(b.id);readyToPublish(d,b.revision);
+      const images=await publishImages(d);
       return json({draft:check(await admin.rpc('catalogue_publish',{p_id:d.id,p_revision:b.revision,p_images:images}))});
     }
     if(b.action==='unpublish')return json({draft:check(await admin.rpc('catalogue_unpublish',{p_id:id(b.id),p_revision:b.revision}))});
@@ -147,7 +183,7 @@ async function handle(req){
     if(b.action==='fetchImage'){const {bytes,type}=await download(b.url,true);return new Response(bytes,{headers:{...cors,'Content-Type':type,'Cache-Control':'no-store'}});}
     if(b.action==='queue'){
       if(!Array.isArray(b.jobs)||b.jobs.length>200)fail('Import up to 200 links at a time.');
-      const jobs=b.jobs.map(j=>({id:id(j.id),url:String(j.url).slice(0,2500),state:'pending'}));
+      const jobs=b.jobs.map(j=>({id:id(j.id),url:String(j.url).slice(0,2500),state:'pending',batch_id:j.batch_id?id(j.batch_id):null}));
       if(jobs.some(j=>!/^https?:\/\//i.test(j.url)))fail('Product links must start with https://.');
       return json({jobs:check(await admin.from('catalogue_imports').upsert(jobs,{onConflict:'id',ignoreDuplicates:true}).select())});
     }

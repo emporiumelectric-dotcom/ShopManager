@@ -1,0 +1,35 @@
+'use strict';
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
+const crypto=require('node:crypto').webcrypto,owner='21e0db6b-373f-4793-93ac-b82ba79e569d',id='00000000-0000-4000-8000-000000000001';
+const source=file=>fs.readFileSync(path.join(__dirname,'..',file),'utf8').replace(/^import [^\n]*\r?\n/,'');
+const clone=x=>JSON.parse(JSON.stringify(x));
+let draft={id,revision:3,publication:'draft',data:{name:'Fan',brand:'Example',category:'Fans',price:'',priceReviewed:true,photos:[{url:'https://dnmzzckeuctnkqbphwdg.supabase.co/storage/v1/object/public/product-photos/a.jpg'}]}},lensCalls=0,publishCalls=0,failPublish=true,writeData;
+const query={update(value){writeData=value;return this;},eq(){return this;},select(){return this;},async maybeSingle(){Object.assign(draft,writeData);return {data:clone(draft)};}};
+const admin={auth:{getUser:async()=>({data:{user:{id:owner}}})},from:()=>query,rpc:async()=>{publishCalls++;if(failPublish)return {error:{message:'Temporary database failure'}};draft.publication='published';draft.published_revision=draft.revision;return {data:clone(draft)};}};
+const context=vm.createContext({createClient:()=>admin,Deno:{env:{get:()=>''},serve:()=>{}},Response,Request,URL,AbortSignal,TextDecoder,Uint8Array,crypto,fetch:async(url,options)=>{
+  if(url.includes('/config.json'))return Response.json({supabaseUrl:'https://buzidwccluskdkccidev.supabase.co',supabaseAnonKey:'gateway-key'});
+  lensCalls++;assert.equal(options.headers['x-website-token'],'owner-session');return Response.json({lensId:42,revision:3});
+}});
+vm.runInContext(source('supabase/functions/catalogue-manager/index.js'),context);
+context.draft=clone(draft);
+(async()=>{
+  await assert.rejects(vm.runInContext("publishBoth(draft,2,'owner-session')",context),/changed/);assert.equal(lensCalls,0);
+  await assert.rejects(vm.runInContext("publishBoth(draft,3,'owner-session')",context),/Saved to EE Lens; website publication is pending/);
+  assert.equal(lensCalls,1);assert.equal(publishCalls,1);assert.equal(draft.data.lensId,'42');assert.equal(draft.data.lensSyncedRevision,3);
+  failPublish=false;context.draft=clone(draft);await vm.runInContext("publishBoth(draft,3,'owner-session')",context);
+  assert.equal(lensCalls,1,'retry skips completed Lens write');assert.equal(publishCalls,2);
+  context.draft=clone(draft);await vm.runInContext("publishBoth(draft,3,'owner-session')",context);
+  assert.equal(publishCalls,2,'full replay is a no-op');
+  context.id=id;const clean=vm.runInContext("cleanData({lensId:'999',lensSyncedRevision:999,photos:[]},id,{lensId:'42',lensSyncedRevision:3})",context);
+  assert.equal(clean.lensId,'42');assert.equal(clean.lensSyncedRevision,3);
+  let authUser=null,writes=0;
+  const receiver=vm.createContext({createClient:()=>({auth:{getUser:async()=>({data:{user:authUser}})},storage:{from(){writes++;throw Error('Unexpected write');}}}),Deno:{env:{get:()=>''},serve:()=>{}},Response,Request,URL,AbortSignal,Uint8Array,TextEncoder,crypto});
+  vm.runInContext(source('supabase-ops/functions/catalogue-receive/index.js'),receiver);
+  for(const url of ['https://evil.example/a.jpg','https://dnmzzckeuctnkqbphwdg.supabase.co/other/a.jpg','http://dnmzzckeuctnkqbphwdg.supabase.co/storage/v1/object/public/product-photos/a.jpg']){
+    receiver.url=url;assert.throws(()=>vm.runInContext('imageUrl(url)',receiver));
+  }
+  let result=await vm.runInContext("handle(new Request('https://example.com',{method:'POST',body:'{}'}))",receiver);assert.equal(result.status,401);
+  result=await vm.runInContext("handle(new Request('https://example.com',{method:'POST',headers:{'x-website-token':'bad'},body:'{}'}))",receiver);assert.equal(result.status,401);
+  authUser={id:'someone-else'};result=await vm.runInContext("handle(new Request('https://example.com',{method:'POST',headers:{'x-website-token':'staff'},body:'{}'}))",receiver);assert.equal(result.status,403);assert.equal(writes,0);
+  console.log('Publish-to-both: stale revisions rejected, partial failures retry safely, completed replays are no-ops, sync receipts protected, receiving endpoint requires the website owner.');
+})().catch(e=>{console.error(e);process.exitCode=1;});

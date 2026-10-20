@@ -178,12 +178,12 @@ async function run() {
 
   assert.deepStrictEqual(
     (await caches.keys()).sort(),
-    ["shopmanager-config-v1", "shopmanager-shell-v4"],
-    "activate must retain only the v4 shell and config caches"
+    ["shopmanager-config-v1", "shopmanager-shell-v5"],
+    "activate must retain only the v5 shell and config caches"
   );
   assert(await configCache.match(configRequest), "upgrade erased cached config");
 
-  const shellCache = await caches.open("shopmanager-shell-v4");
+  const shellCache = await caches.open("shopmanager-shell-v5");
   assert(
     shellCache.added.includes("./vendor/supabase-2.112.2.js"),
     "vendored supabase-js missing from atomic shell install"
